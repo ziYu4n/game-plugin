@@ -1,7 +1,7 @@
 {
   "id": "yanyun_moyu",
   "group": "yanyun",
-  "name": "日常刷么鱼",
+  "name": "觉障林",
   "order": 5,
   "description": "点菜单→读角色名→同游→止戈→觉障林双击→开始匹配→杀后台。可先用手校点位校准。需已在游戏内。",
   "use_common": false,
@@ -13,14 +13,23 @@
       "type": "find_icon_click",
       "name": "菜单按钮",
       "calib_key": "menu",
-      "templates": ["icons/moyu_menu_tight.png", "icons/moyu_menu.png"],
+      "templates": [
+        "icons/moyu_menu_tight.png",
+        "icons/moyu_menu.png"
+      ],
       "min_score": 0.62,
       "timeout": 16,
       "interval": 1.0,
       "wait": 1.0,
       "clicks": 1,
-      "point_port": [0.88, 0.86],
-      "point_land": [0.90, 0.12],
+      "point_port": [
+        0.88,
+        0.86
+      ],
+      "point_land": [
+        0.9,
+        0.12
+      ],
       "required": true
     },
     {
@@ -35,8 +44,13 @@
       "type": "tap_text",
       "name": "同游",
       "calib_key": "tongyou",
-      "keywords": ["同游"],
-      "templates": ["icons/moyu_tongyou_hi.png", "icons/moyu_tongyou.png"],
+      "keywords": [
+        "同游"
+      ],
+      "templates": [
+        "icons/moyu_tongyou_hi.png",
+        "icons/moyu_tongyou.png"
+      ],
       "prefer_icon": true,
       "min_score": 0.62,
       "timeout": 16,
@@ -49,25 +63,38 @@
       "type": "tap_text",
       "name": "止戈",
       "calib_key": "zhige",
-      "keywords": ["止戈"],
-      "templates": ["icons/moyu_zhige_hi.png", "icons/moyu_zhige.png"],
+      "keywords": [
+        "止戈"
+      ],
+      "templates": [
+        "icons/moyu_zhige_hi.png",
+        "icons/moyu_zhige.png"
+      ],
       "prefer_icon": true,
-      "min_score": 0.60,
+      "min_score": 0.6,
       "timeout": 16,
       "interval": 1.0,
       "wait": 1.2,
       "clicks": 1,
-      "stop_when": ["觉障林", "开始匹配"],
+      "stop_when": [
+        "觉障林",
+        "开始匹配"
+      ],
       "required": true
     },
     {
       "type": "tap_text",
       "name": "觉障林",
       "calib_key": "juezhanglin",
-      "keywords": ["觉障林"],
-      "templates": ["icons/moyu_juezhanglin_hi.png", "icons/moyu_juezhanglin.png"],
+      "keywords": [
+        "觉障林"
+      ],
+      "templates": [
+        "icons/moyu_juezhanglin_hi.png",
+        "icons/moyu_juezhanglin.png"
+      ],
       "prefer_icon": true,
-      "min_score": 0.60,
+      "min_score": 0.6,
       "timeout": 18,
       "interval": 1.0,
       "wait": 1.0,
@@ -78,25 +105,39 @@
       "type": "tap_text",
       "name": "开始匹配",
       "calib_key": "start_match",
-      "keywords": ["开始匹配"],
+      "keywords": [
+        "开始匹配"
+      ],
       "prefer_icon": false,
-      "min_score": 0.70,
+      "min_score": 0.7,
       "timeout": 14,
       "interval": 1.0,
       "wait": 1.0,
       "clicks": 1,
-      "bias": [0.0, 0.0],
-      "stop_when": ["退出匹配"],
+      "bias": [
+        0.0,
+        0.0
+      ],
+      "stop_when": [
+        "退出匹配"
+      ],
       "required": true
     },
     {
       "type": "wait_match_and_kill",
       "name": "确认匹配并杀后台",
-      "ready_when": ["退出匹配"],
-      "gone_when": ["开始匹配"],
+      "ready_when": [
+        "退出匹配"
+      ],
+      "gone_when": [
+        "开始匹配"
+      ],
       "timeout": 18,
       "interval": 1.0,
       "required": false
     }
-  ]
+  ],
+  "group_name": "燕云十六声",
+  "search": "",
+  "keywords": []
 }

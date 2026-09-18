@@ -1,0 +1,17 @@
+{
+  "id": "script_943e6d",
+  "group": "starrail",
+  "group_name": "星穹铁道",
+  "name": "日常",
+  "order": 50,
+  "description": "星穹铁道",
+  "use_common": true,
+  "keep_alive": true,
+  "reconnect": false,
+  "watch_only": false,
+  "steps": [],
+  "search": "星穹铁道",
+  "keywords": [
+    "星穹铁道"
+  ]
+}

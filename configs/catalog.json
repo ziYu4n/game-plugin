@@ -1,6 +1,12 @@
 {
   "groups": [
-    { "id": "yanyun", "name": "燕云十六声" },
-    { "id": "starrail", "name": "星穹铁道" }
+    {
+      "id": "yanyun",
+      "name": "燕云十六声"
+    },
+    {
+      "id": "starrail",
+      "name": "星穹铁道"
+    }
   ]
 }

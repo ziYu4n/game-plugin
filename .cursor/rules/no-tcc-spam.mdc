@@ -9,21 +9,24 @@ alwaysApply: true
 
 ## 硬禁止
 
-1. **禁止**用 `screencapture` 做权限探针（含 `perm_probe`、启动自检、`permission_report(probe_screen=True)`）。
-2. **禁止**每次启动对已有二进制 `codesign --force`；**只在真正重新编译后**签一次。重签会换 CDHash，系统当成新程序，权限作废再弹窗。
+1. **禁止**用 `screencapture`（默认 `ALLOW_SCREEN_CAPTURE = False`；禁止探针、启动自检）。
+2. **禁止**每次启动对已有二进制 `codesign --force`；重签会换 CDHash，系统当成新程序再弹窗。
 3. **禁止**无意义 `touch` 源码触发重编（尤其 `scripts/*.swift`）。
-4. **禁止**在回放/点击热路径里频繁截图；截图失败必须进入冷却，禁止连环重试叠弹窗。
-5. 改点击/OCR/录制逻辑时，默认假设：**权限已授过一次，绝不能主动再触发授权 UI**。
+4. **禁止**在回放/点击热路径里截图。
+5. **禁止**权限自检 UI / `permission_report` 探测。
+6. **禁止**日常「重启界面」走 `force_rebuild_tools` / `rebuild: true`。
+7. **禁止**手校记点路径调用 `capture_window` / `screencapture`。
 
 ## 允许
 
-- 业务必需时才 `capture_window`（OCR/识图），且复用新鲜截图、失败冷却。
-- 用户已勾选「屏幕录制 + 辅助功能」给「脚本合集」（或实际启动进程）；缺权限时日志提示勾选，不要探针验证。
+- 手校点位 + 绝对 CG 回放点击（不依赖截屏）。
+- 用户已勾选权限时，如需临时开识图：把 `ALLOW_SCREEN_CAPTURE` 改为 `True`（会再弹录屏，慎用）。
+- 界面「重启界面」：只重启 GUI 进程。
 
 ## 改代码前自检
 
-- 这次改动会不会重编 click/ocr/clickwatch/hotkey？
-- 会不会新增启动时的 screencapture？
-- 失败路径会不会每秒截一次图？
+- 会不会调用 screencapture / 开 ALLOW_SCREEN_CAPTURE？
+- 会不会重编 click/ocr/clickwatch/hotkey/wininfo/overlay？
+- 重启会不会默认 rebuild？
 
 有一条是「会」→ 必须改掉再提交思路。

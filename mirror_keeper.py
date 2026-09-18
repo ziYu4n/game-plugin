@@ -23,6 +23,9 @@ PID_FILE = os.path.join(DATA_DIR, "keeper.pid")
 SCREENSHOT = os.path.join(DATA_DIR, "mirror_window.png")
 LAST_SHOT = os.path.join(DATA_DIR, "last_shot.png")
 ACCOUNT_IMG = os.path.join(DATA_DIR, "account.png")
+# 允许业务截屏（OCR/识图）。失败会硬停，避免连环弹「屏幕录制」。
+# 若仍弹权限：系统设置勾选「脚本合集」一次即可。
+ALLOW_SCREEN_CAPTURE = True
 SHOT_DIR = os.path.join(LOG_DIR, "shots")
 RECORD_DIR = os.path.join(DATA_DIR, "recordings")
 COORD_CONFIG = os.path.join(DATA_DIR, "coord_config.json")
@@ -270,8 +273,9 @@ def note_ax_denied(text):
     return True
 
 
-def osascript(command):
-    code, out, err = run_cmd(["osascript", APPLESCRIPT, command], timeout=8)
+def osascript(command, *extra):
+    cmd = ["osascript", APPLESCRIPT, command] + [str(x) for x in extra]
+    code, out, err = run_cmd(cmd, timeout=8)
     text = out or err
     if code != 0 and not text:
         text = "ERR:osascript-failed"
@@ -851,7 +855,14 @@ def log_window_geom(tag=""):
 _last_cap_warn = 0
 _capture_deny_until = 0
 _capture_fail_streak = 0
+_screen_tcc_denied = False  # 一旦「could not create image」就硬停，直到重启进程
 CAPTURE_REUSE_SEC = 1.6
+TCC_DENY_SEC = 6 * 3600  # 无屏幕录制时半天内不再调用 screencapture
+
+
+def screen_tcc_denied():
+    """仅「屏幕录制未授权」硬标志；普通截图冷却用 capture_denied()。"""
+    return bool(_screen_tcc_denied)
 
 
 def _shot_size(path):
@@ -930,23 +941,47 @@ def capture_denied():
 
 
 def note_capture_fail(reason=""):
-    """连续截图失败 → 冷却，避免权限弹窗叠一层又一层卡住。"""
-    global _capture_fail_streak, _capture_deny_until, _last_cap_warn
+    """截图失败 → 立刻冷却。TCC 拒绝则硬停，避免连环弹「屏幕录制」。"""
+    global _capture_fail_streak, _capture_deny_until, _last_cap_warn, _screen_tcc_denied
     _capture_fail_streak += 1
     now = time.time()
+    reason_l = (reason or "").lower()
+    is_tcc = (
+        "could not create image" in reason_l
+        or "not authorized" in reason_l
+        or "not permitted" in reason_l
+        or "capture session" in reason_l
+    )
+    if is_tcc:
+        _screen_tcc_denied = True
+        _capture_deny_until = now + TCC_DENY_SEC
+        if now - _last_cap_warn > 3:
+            _last_cap_warn = now
+            log("ERROR", "屏幕录制未授权（%s）→ 已停止一切截图 %.0f 小时。"
+                "请：系统设置 → 隐私与安全性 → 屏幕录制 → 勾选「脚本合集」→ 再点「重启界面」。"
+                % ((reason or "TCC").strip()[:80], TCC_DENY_SEC / 3600.0))
+        return
+    cool = 90 if _capture_fail_streak >= 2 else 30
+    _capture_deny_until = now + cool
     if now - _last_cap_warn > 5:
         _last_cap_warn = now
-        log("WARN", "截图失败%s（若弹「屏幕录制」，勾选「脚本合集」后点允许；冷却中不再反复截）"
-            % ((": " + reason) if reason else ""))
-    if _capture_fail_streak >= 2:
-        _capture_deny_until = now + 45
-        log("WARN", "截图连续失败，暂停截图 45 秒，避免卡在权限窗")
+        log("WARN", "截图失败%s，暂停 %s 秒（勿连环重试）"
+            % (((": " + reason) if reason else ""), cool))
 
 
 def note_capture_ok():
-    global _capture_fail_streak, _capture_deny_until
+    global _capture_fail_streak, _capture_deny_until, _screen_tcc_denied
     _capture_fail_streak = 0
     _capture_deny_until = 0
+    _screen_tcc_denied = False
+
+
+def clear_screen_tcc_deny():
+    """用户勾完屏幕录制后可手动清（或重启进程）。"""
+    global _screen_tcc_denied, _capture_deny_until, _capture_fail_streak
+    _screen_tcc_denied = False
+    _capture_deny_until = 0
+    _capture_fail_streak = 0
 
 
 def screenshot_fresh(max_age=None):
@@ -960,10 +995,22 @@ def screenshot_fresh(max_age=None):
 
 
 def capture_window(force=False):
-    """截图统一去阴影：screencapture -x -o -l <windowId>。
-    默认复用刚截过的图，失败进入冷却，避免权限弹窗连环卡住。
+    """截图入口。默认永不调用 screencapture，避免弹「屏幕录制」卡死。
+
+    只复用磁盘上已有截图刷新 metrics；需要识图时请先手动放图或改 ALLOW_SCREEN_CAPTURE。
     """
-    global _last_cap_warn
+    # 硬开关：禁止主动截屏（用户要求去掉要权限的逻辑）
+    if not ALLOW_SCREEN_CAPTURE:
+        if os.path.isfile(SCREENSHOT) and os.path.getsize(SCREENSHOT) > 1000:
+            # 有旧图就用，绝不新截
+            if force or not screenshot_fresh(3600):
+                info = window_info()
+                if info:
+                    refresh_metrics(info=info, shot_path=SCREENSHOT)
+            return True
+        return False
+    if _screen_tcc_denied and not force:
+        return False
     if capture_denied() and not force:
         return False
     if (not force) and screenshot_fresh():
@@ -982,7 +1029,6 @@ def capture_window(force=False):
             pass
     err, out = "", ""
     if window_id:
-        # 超时要短：权限窗会挂起 screencapture，尽快放弃
         code, out, err = run_cmd(
             ["screencapture", "-x", "-o", "-l", str(window_id), SCREENSHOT],
             timeout=4,
@@ -1103,7 +1149,11 @@ def wait_until_connected(timeout=25):
     while time.time() < end:
         if should_stop():
             return False
+        if (not ALLOW_SCREEN_CAPTURE) or screen_tcc_denied():
+            return has_window()
         text = ocr_text()
+        if screen_tcc_denied():
+            return has_window()
         state = screen_state(text)
         if state == "connecting":
             set_phase("connecting")
@@ -1165,13 +1215,27 @@ IN_GAME_WORDS = [
 def wait_mirror_ready(timeout=35):
     log("INFO", "等待镜像真正连上，连上前不搜索、不点游戏")
     end = time.time() + timeout
+    saw_window_at = 0
     while time.time() < end:
         if not wait_if_paused():
             return False
         if not has_window():
+            saw_window_at = 0
             time.sleep(0.6)
             continue
+        if not saw_window_at:
+            saw_window_at = time.time()
+        # 关闭主动截屏 / TCC 硬停：不 OCR，窗口在就当连上
+        if (not ALLOW_SCREEN_CAPTURE) or screen_tcc_denied():
+            if time.time() - saw_window_at >= 1.2:
+                log("INFO", "镜像窗口已在（跳过连线 OCR）")
+                return True
+            time.sleep(0.4)
+            continue
         text = ocr_text()
+        if screen_tcc_denied():
+            log("WARN", "截图触发权限拒绝，后续不再截；窗口已在则继续")
+            return True
         state = screen_state(text)
         if state == "connecting":
             log("INFO", "镜像还在连接，继续等")
@@ -2383,13 +2447,212 @@ def list_configs():
     return items
 
 
+def load_catalog():
+    path = os.path.join(CONFIG_DIR, "catalog.json")
+    data = load_config_file(path)
+    if data and isinstance(data.get("groups"), list):
+        return data
+    return {
+        "groups": [
+            {"id": "yanyun", "name": "燕云十六声"},
+            {"id": "starrail", "name": "星穹铁道"},
+        ],
+    }
+
+
+def save_catalog(catalog):
+    path = os.path.join(CONFIG_DIR, "catalog.json")
+    data = catalog if isinstance(catalog, dict) else {"groups": catalog}
+    if "groups" not in data:
+        data = {"groups": data}
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        # catalog 不带 _path
+        clean = {"groups": []}
+        for g in (data.get("groups") or []):
+            if not g or not g.get("id"):
+                continue
+            clean["groups"].append({
+                "id": str(g["id"]).strip(),
+                "name": str(g.get("name") or g["id"]).strip(),
+            })
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(clean, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        return True, ""
+    except Exception as e:
+        return False, "保存分组失败：%s" % e
+
+
+_GROUP_ALIASES = {
+    "燕云": "yanyun",
+    "燕云十六声": "yanyun",
+    "崩铁": "starrail",
+    "星穹铁道": "starrail",
+    "星铁": "starrail",
+}
+
+
+def slug_group_id(name, existing=None):
+    """中文名 → 稳定 id；常见游戏名走别名。"""
+    raw = (name or "").strip()
+    if raw in _GROUP_ALIASES:
+        return _GROUP_ALIASES[raw]
+    existing = existing or set()
+    base = re.sub(r"[^a-zA-Z0-9_]+", "_", raw).strip("_").lower()
+    if not base:
+        base = "g_" + hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
+    if base in ("common", "catalog", "icons", "keep_alive"):
+        base = "g_" + base
+    sid = base
+    n = 2
+    while sid in existing:
+        sid = "%s_%s" % (base, n)
+        n += 1
+    return sid
+
+
 def group_display_name(group_id):
+    gid = (group_id or "").strip()
+    cat = load_catalog()
+    for g in (cat.get("groups") or []):
+        if g.get("id") == gid:
+            return g.get("name") or gid
     mapping = {
         "yanyun": "燕云十六声",
         "starrail": "星穹铁道",
         "record": "手点录制",
+        "other": "其他",
     }
-    return mapping.get(group_id) or group_id
+    return mapping.get(gid) or gid
+
+
+def known_group_ids():
+    ids = []
+    for g in (load_catalog().get("groups") or []):
+        if g.get("id"):
+            ids.append(g["id"])
+    return ids
+
+
+def create_group(name):
+    name = (name or "").strip()
+    if not name:
+        return None, "请填写分组名称"
+    cat = load_catalog()
+    groups = list(cat.get("groups") or [])
+    existing = {g.get("id") for g in groups if g.get("id")}
+    # 同名直接返回
+    for g in groups:
+        if (g.get("name") or "").strip() == name:
+            return {"id": g["id"], "name": g.get("name") or g["id"]}, ""
+    # 别名撞上已有 id：当作选中已有，不改名、不新建
+    alias_id = _GROUP_ALIASES.get(name)
+    if alias_id and alias_id in existing:
+        for g in groups:
+            if g.get("id") == alias_id:
+                return {"id": alias_id, "name": g.get("name") or name}, ""
+    gid = slug_group_id(name, existing)
+    if gid in existing:
+        for g in groups:
+            if g.get("id") == gid:
+                return {"id": gid, "name": g.get("name") or name}, ""
+    item = {"id": gid, "name": name}
+    groups.append(item)
+    cat["groups"] = groups
+    ok, err = save_catalog(cat)
+    if not ok:
+        return None, err
+    folder = os.path.join(CONFIG_DIR, gid)
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except Exception as e:
+        return None, "创建目录失败：%s" % e
+    log("INFO", "已新建分组：%s → configs/%s/" % (name, gid))
+    return item, ""
+
+
+def rename_group(group_id, name):
+    gid = (group_id or "").strip()
+    name = (name or "").strip()
+    if not gid or not name:
+        return False, "缺少分组或名称"
+    cat = load_catalog()
+    found = False
+    for g in (cat.get("groups") or []):
+        if g.get("id") == gid:
+            g["name"] = name
+            found = True
+            break
+    if not found:
+        return False, "找不到分组"
+    ok, err = save_catalog(cat)
+    if not ok:
+        return False, err
+    # 同步已有脚本里的 group_name
+    for cfg in list_configs():
+        if cfg.get("group") == gid:
+            cfg["group_name"] = name
+            save_config(cfg)
+    return True, ""
+
+
+def delete_group(group_id):
+    gid = (group_id or "").strip()
+    if not gid:
+        return False, "缺少分组"
+    kids = [c for c in list_configs() if (c.get("group") or "") == gid]
+    if kids:
+        return False, "分组里还有 %s 个脚本，请先移走或删除" % len(kids)
+    cat = load_catalog()
+    groups = [g for g in (cat.get("groups") or []) if g.get("id") != gid]
+    if len(groups) == len(cat.get("groups") or []):
+        return False, "找不到分组"
+    cat["groups"] = groups
+    ok, err = save_catalog(cat)
+    if not ok:
+        return False, err
+    folder = os.path.join(CONFIG_DIR, gid)
+    if os.path.isdir(folder):
+        try:
+            # 只删空目录
+            if not os.listdir(folder):
+                os.rmdir(folder)
+        except Exception:
+            pass
+    log("INFO", "已删除分组：%s" % gid)
+    return True, ""
+
+
+def move_script_group(sid, new_group):
+    """改脚本所属分组，并搬到 configs/<group>/<id>.json。"""
+    cfg = _find_config_by_id(sid)
+    if not cfg:
+        return False, "找不到脚本"
+    new_group = (new_group or "").strip()
+    if not new_group:
+        return False, "缺少分组"
+    # 分组不存在则拒绝（先去新建）
+    if new_group not in known_group_ids():
+        # 允许孤儿目录已存在
+        if not os.path.isdir(os.path.join(CONFIG_DIR, new_group)):
+            return False, "分组不存在，请先新建分组"
+    old_path = cfg.get("_path") or ""
+    old_group = cfg.get("group") or ""
+    cfg["group"] = new_group
+    cfg["group_name"] = group_display_name(new_group)
+    new_path = os.path.join(CONFIG_DIR, new_group, "%s.json" % cfg["id"])
+    cfg["_path"] = new_path
+    ok, err = save_config(cfg)
+    if not ok:
+        return False, err
+    if old_path and os.path.abspath(old_path) != os.path.abspath(new_path) and os.path.isfile(old_path):
+        try:
+            os.remove(old_path)
+        except Exception as e:
+            log("WARN", "旧配置未删掉 %s: %s" % (old_path, e))
+    log("INFO", "脚本 %s：%s → %s" % (cfg.get("name") or sid, old_group, new_group))
+    return True, ""
 
 
 def clear_all_hand_recordings():
@@ -2423,7 +2686,7 @@ def _is_recorded_script(cfg):
 
 
 def delete_script(script_id):
-    """删除手动录制脚本：配置 + 录制数据。内置脚本不可删。"""
+    """删除脚本配置；录制脚本顺带清录制目录。"""
     sid = (script_id or "").strip()
     if not sid:
         return False, "缺少脚本 id"
@@ -2434,9 +2697,6 @@ def delete_script(script_id):
             break
     if not cfg:
         return False, "找不到脚本"
-    if not _is_recorded_script(cfg):
-        return False, "只能删除手动录制的脚本"
-    # 录制数据目录
     rid = sid
     for step in (cfg.get("steps") or []):
         if step.get("recording_id"):
@@ -2450,55 +2710,355 @@ def delete_script(script_id):
         except Exception as e:
             return False, "删除配置失败：%s" % e
     else:
-        for group in ("yanyun", "starrail"):
-            p = os.path.join(CONFIG_DIR, group, sid + ".json")
+        seen = set()
+        for gid in known_group_ids() + ["yanyun", "starrail"]:
+            if gid in seen:
+                continue
+            seen.add(gid)
+            p = os.path.join(CONFIG_DIR, gid, sid + ".json")
             if os.path.isfile(p):
                 try:
                     os.remove(p)
                 except Exception as e:
                     return False, "删除配置失败：%s" % e
-    if os.path.isdir(folder):
+    if _is_recorded_script(cfg) and os.path.isdir(folder):
         try:
             shutil.rmtree(folder)
         except Exception as e:
             log("WARN", "录制数据删除失败：%s" % e)
-    log("INFO", "已删除手点脚本：%s" % sid)
+    log("INFO", "已删除脚本：%s" % sid)
     return True, ""
 
 
+# 脚本步骤可编辑类型（界面新增用；引擎里还有更多，可用 JSON 高级编辑）
+STEP_TYPE_CATALOG = [
+    {"type": "find_icon_click", "label": "找图标点击", "hint": "模板/手校点图标"},
+    {"type": "tap_text", "label": "点文字/图标", "hint": "OCR 或模板，可绑手校"},
+    {"type": "close_popups", "label": "关公告", "hint": "登录用，关更新公告"},
+    {"type": "wait_screen", "label": "等待画面", "hint": "等到出现某些字"},
+    {"type": "ocr_flow", "label": "识图点击流", "hint": "多规则循环点"},
+    {"type": "read_account", "label": "识别账号", "hint": "继续游戏旁账号名"},
+    {"type": "read_role_name", "label": "识别角色名", "hint": "菜单里角色编号上方"},
+    {"type": "wait_match_and_kill", "label": "匹配后杀后台", "hint": "刷么鱼收尾"},
+    {"type": "kill_game_background", "label": "杀游戏后台", "hint": "多任务上滑关掉"},
+    {"type": "tap_point", "label": "点固定坐标", "hint": "fx/fy 相对窗口"},
+    {"type": "go_home", "label": "回主屏幕", "hint": "cmd-1"},
+    {"type": "open_search", "label": "打开搜索", "hint": "Spotlight"},
+    {"type": "ensure_mirror", "label": "确保镜像", "hint": "窗口就绪"},
+    {"type": "unlock_if_needed", "label": "解锁", "hint": "锁屏则解锁"},
+    {"type": "replay_recording", "label": "回放手点", "hint": "录制脚本"},
+]
+
+
+def _default_step(kind):
+    kind = (kind or "").strip() or "tap_text"
+    base = {"type": kind, "name": "", "required": True}
+    if kind == "find_icon_click":
+        base.update({
+            "name": "点图标", "calib_key": "", "templates": [],
+            "min_score": 0.60, "timeout": 16, "interval": 1.0, "wait": 1.0, "clicks": 1,
+        })
+    elif kind == "tap_text":
+        base.update({
+            "name": "点文字", "calib_key": "", "keywords": [], "templates": [],
+            "prefer_icon": True, "min_score": 0.60, "timeout": 16, "interval": 1.0,
+            "wait": 1.0, "clicks": 1,
+        })
+    elif kind == "close_popups":
+        base.update({
+            "name": "关闭公告", "timeout": 50, "interval": 1.2, "icon_first": True,
+            "when": ["更新公告", "版本更新", "玩法内容"],
+            "stop_when": ["继续游戏", "选择角色"],
+        })
+    elif kind == "wait_screen":
+        base.update({
+            "name": "等待画面", "keywords": [], "timeout": 30, "interval": 1.5, "required": False,
+        })
+    elif kind == "ocr_flow":
+        base.update({
+            "name": "识图点击", "timeout": 25, "interval": 1.3, "required": False,
+            "taps": [{"keywords": ["继续游戏"], "wait": 2.0}],
+            "stop_when": [],
+        })
+    elif kind == "read_account":
+        base.update({"name": "识别账号", "anchor": "继续游戏", "timeout": 30, "interval": 1.3})
+    elif kind == "read_role_name":
+        base.update({
+            "name": "识别角色名", "anchor": "角色编号", "timeout": 12, "interval": 1.0, "required": False,
+        })
+    elif kind == "wait_match_and_kill":
+        base.update({
+            "name": "确认匹配并杀后台", "ready_when": ["退出匹配"], "gone_when": ["开始匹配"],
+            "timeout": 18, "interval": 1.0, "required": False,
+        })
+    elif kind == "kill_game_background":
+        base.update({"name": "杀游戏后台"})
+    elif kind == "tap_point":
+        base.update({"name": "点坐标", "fx": 0.5, "fy": 0.5})
+    elif kind == "go_home":
+        base.update({"name": "回主屏幕", "hotkey": "cmd-1", "click_bar": True})
+    elif kind == "open_search":
+        base.update({"name": "打开搜索"})
+    elif kind == "ensure_mirror":
+        base.update({"name": "确保镜像"})
+    elif kind == "unlock_if_needed":
+        base.update({"name": "解锁"})
+    elif kind == "replay_recording":
+        base.update({"name": "回放手点", "recording_id": "", "wait": 1.0})
+    else:
+        base["name"] = kind
+    return base
+
+
+def _find_config_by_id(sid):
+    sid = (sid or "").strip()
+    if not sid:
+        return None
+    for item in list_configs():
+        if item.get("id") == sid:
+            return item
+    return None
+
+
+def _strip_runtime(cfg):
+    data = json.loads(json.dumps(cfg, ensure_ascii=False))
+    data.pop("_path", None)
+    return data
+
+
+def save_config(cfg):
+    """把脚本写回其 _path；没有路径则按 group/id 落盘。"""
+    if not isinstance(cfg, dict) or not cfg.get("id"):
+        return False, "配置无效"
+    path = cfg.get("_path") or ""
+    data = _strip_runtime(cfg)
+    if not path:
+        group = (data.get("group") or "yanyun").strip() or "yanyun"
+        folder = os.path.join(CONFIG_DIR, group)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, "%s.json" % data["id"])
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+    except Exception as e:
+        return False, "保存失败：%s" % e
+    log("INFO", "已保存脚本：%s → %s" % (data.get("name") or data["id"], path))
+    return True, path
+
+
+def get_script_detail(sid):
+    cfg = _find_config_by_id(sid)
+    if not cfg:
+        return None, "找不到脚本"
+    out = _strip_runtime(cfg)
+    out["_path"] = cfg.get("_path") or ""
+    out["deletable"] = _is_recorded_script(cfg)
+    out["recorded"] = _is_recorded_script(cfg)
+    out["steps"] = list(cfg.get("steps") or [])
+    return out, ""
+
+
+def update_script_meta(sid, patch):
+    cfg = _find_config_by_id(sid)
+    if not cfg:
+        return False, "找不到脚本"
+    patch = patch or {}
+    if "group" in patch and (patch.get("group") or "").strip():
+        ok, err = move_script_group(sid, patch.get("group"))
+        if not ok:
+            return False, err
+        cfg = _find_config_by_id(sid)
+        if not cfg:
+            return False, "搬家后找不到脚本"
+    for key in (
+        "name", "description", "order", "use_common", "keep_alive", "reconnect",
+        "watch_only", "search", "icon",
+    ):
+        if key in patch:
+            cfg[key] = patch[key]
+    if "keywords" in patch:
+        kw = patch.get("keywords")
+        if isinstance(kw, str):
+            cfg["keywords"] = [x.strip() for x in kw.replace("，", ",").split(",") if x.strip()]
+        elif isinstance(kw, list):
+            cfg["keywords"] = [str(x).strip() for x in kw if str(x).strip()]
+    ok, err = save_config(cfg)
+    return ok, err if not ok else ""
+
+
+def create_script(name, group="yanyun", use_common=False):
+    name = (name or "").strip()
+    if not name:
+        return None, "请填写脚本名称"
+    group = (group or "yanyun").strip() or "yanyun"
+    if group not in known_group_ids():
+        cat = load_catalog()
+        groups = list(cat.get("groups") or [])
+        groups.append({"id": group, "name": group_display_name(group)})
+        cat["groups"] = groups
+        ok, err = save_catalog(cat)
+        if not ok:
+            return None, err
+        os.makedirs(os.path.join(CONFIG_DIR, group), exist_ok=True)
+    existing = {c.get("id") for c in list_configs()}
+    base = re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_").lower()
+    if not base:
+        base = "script_" + hashlib.md5(name.encode("utf-8")).hexdigest()[:6]
+    sid = base
+    n = 2
+    while sid in existing:
+        sid = "%s_%s" % (base, n)
+        n += 1
+    cfg = {
+        "id": sid,
+        "group": group,
+        "group_name": group_display_name(group),
+        "name": name,
+        "order": 50,
+        "description": "",
+        "use_common": bool(use_common),
+        "keep_alive": False,
+        "reconnect": False,
+        "watch_only": False,
+        "steps": [],
+    }
+    folder = os.path.join(CONFIG_DIR, group)
+    os.makedirs(folder, exist_ok=True)
+    cfg["_path"] = os.path.join(folder, "%s.json" % sid)
+    ok, err = save_config(cfg)
+    if not ok:
+        return None, err
+    log("INFO", "已新建脚本：%s（分组 %s）" % (name, group))
+    return get_script_detail(sid)[0], ""
+
+
+def add_script_step(sid, step=None, kind=None):
+    cfg = _find_config_by_id(sid)
+    if not cfg:
+        return False, "找不到脚本", None
+    if isinstance(step, dict) and step.get("type"):
+        new_step = json.loads(json.dumps(step, ensure_ascii=False))
+    else:
+        new_step = _default_step(kind or "tap_text")
+    if not new_step.get("name"):
+        label = next((t["label"] for t in STEP_TYPE_CATALOG if t["type"] == new_step.get("type")), "")
+        new_step["name"] = label or (new_step.get("type") or "步骤")
+    steps = list(cfg.get("steps") or [])
+    steps.append(new_step)
+    cfg["steps"] = steps
+    ok, err = save_config(cfg)
+    if not ok:
+        return False, err, None
+    return True, "", {"index": len(steps) - 1, "step": new_step, "steps": steps}
+
+
+def update_script_step(sid, index, step):
+    cfg = _find_config_by_id(sid)
+    if not cfg:
+        return False, "找不到脚本", None
+    steps = list(cfg.get("steps") or [])
+    try:
+        index = int(index)
+    except Exception:
+        return False, "索引无效", None
+    if index < 0 or index >= len(steps):
+        return False, "步骤不存在", None
+    if not isinstance(step, dict) or not step.get("type"):
+        return False, "步骤内容无效", None
+    steps[index] = json.loads(json.dumps(step, ensure_ascii=False))
+    cfg["steps"] = steps
+    ok, err = save_config(cfg)
+    if not ok:
+        return False, err, None
+    return True, "", {"index": index, "step": steps[index], "steps": steps}
+
+
+def delete_script_step(sid, index):
+    cfg = _find_config_by_id(sid)
+    if not cfg:
+        return False, "找不到脚本", None
+    steps = list(cfg.get("steps") or [])
+    try:
+        index = int(index)
+    except Exception:
+        return False, "索引无效", None
+    if index < 0 or index >= len(steps):
+        return False, "步骤不存在", None
+    steps.pop(index)
+    cfg["steps"] = steps
+    ok, err = save_config(cfg)
+    if not ok:
+        return False, err, None
+    return True, "", {"steps": steps}
+
+
+def move_script_step(sid, index, direction):
+    cfg = _find_config_by_id(sid)
+    if not cfg:
+        return False, "找不到脚本", None
+    steps = list(cfg.get("steps") or [])
+    try:
+        index = int(index)
+        direction = int(direction)
+    except Exception:
+        return False, "参数无效", None
+    j = index + (1 if direction > 0 else -1)
+    if index < 0 or index >= len(steps):
+        return False, "步骤不存在", None
+    if j < 0 or j >= len(steps):
+        return True, "", {"steps": steps}
+    steps[index], steps[j] = steps[j], steps[index]
+    cfg["steps"] = steps
+    ok, err = save_config(cfg)
+    if not ok:
+        return False, err, None
+    return True, "", {"steps": steps, "index": j}
+
+
 def list_groups():
-    groups = [
-        { "id": "yanyun", "name": "燕云十六声", "scripts": [] },
-        { "id": "starrail", "name": "星穹铁道", "scripts": [] },
-    ]
-    path = os.path.join(CONFIG_DIR, "catalog.json")
-    data = load_config_file(path)
-    if data and data.get("groups"):
-        groups = []
-        for item in data.get("groups") or []:
-            groups.append({
-                "id": item.get("id"),
-                "name": item.get("name") or item.get("id"),
-                "scripts": [],
-            })
+    cat = load_catalog()
+    groups = []
+    for item in (cat.get("groups") or []):
+        if not item or not item.get("id"):
+            continue
+        groups.append({
+            "id": item.get("id"),
+            "name": item.get("name") or item.get("id"),
+            "scripts": [],
+        })
+    if not groups:
+        groups = [
+            {"id": "yanyun", "name": "燕云十六声", "scripts": []},
+            {"id": "starrail", "name": "星穹铁道", "scripts": []},
+        ]
     by_id = {}
     for g in groups:
         by_id[g["id"]] = g
     for cfg in list_configs():
         gid = cfg.get("group") or "other"
         if gid not in by_id:
-            by_id[gid] = { "id": gid, "name": cfg.get("group_name") or gid, "scripts": [] }
+            by_id[gid] = {
+                "id": gid,
+                "name": cfg.get("group_name") or group_display_name(gid),
+                "scripts": [],
+            }
             groups.append(by_id[gid])
         by_id[gid]["scripts"].append({
             "id": cfg.get("id"),
             "name": cfg.get("name") or cfg.get("id"),
             "description": cfg.get("description") or "",
             "order": int(cfg.get("order") or 99),
-            "deletable": _is_recorded_script(cfg),
+            "group": gid,
+            "deletable": True,
             "recorded": _is_recorded_script(cfg),
+            "editable": True,
+            "step_count": len(cfg.get("steps") or []),
         })
     for g in groups:
         g["scripts"].sort(key=lambda s: (s.get("order") if isinstance(s.get("order"), int) else 99, s.get("name") or ""))
+        g["script_count"] = len(g["scripts"])
     return groups
 
 
@@ -2603,19 +3163,149 @@ def send_hotkey(name, focus=False):
     return True
 
 
-# 镜像窗口太小 OCR/图标容易糊；目标高度约一掌机大小
+# 镜像窗口目标尺寸（竖屏约手机比例；横屏对调）
 MIRROR_MIN_H = 620
 MIRROR_MIN_W = 280
+MIRROR_TARGET_PORT = (450, 980)   # 竖屏常用
+MIRROR_TARGET_LAND = (980, 450)   # 横屏常用
+
+
+def set_mirror_window_size(w, h):
+    """尽量把镜像窗口改到 w×h。优先 AX/System Events，不行再 HID 拖右下角。"""
+    try:
+        w = int(round(float(w)))
+        h = int(round(float(h)))
+    except Exception:
+        return None
+    if w < 200 or h < 200:
+        return None
+    info = window_info()
+    if not info:
+        log("WARN", "设置尺寸失败：找不到镜像窗口")
+        return None
+    ox, oy, ow, oh = info["outer"]
+    if abs(ow - w) < 8 and abs(oh - h) < 8:
+        return int(ow), int(oh)
+
+    ensure_mirror_front(force=True)
+    time.sleep(0.15)
+
+    # 1) AppleScript / AX
+    text = (osascript("set-size", w, h) or "").strip()
+    time.sleep(0.25)
+    info2 = window_info()
+    if info2:
+        nw, nh = int(info2["outer"][2]), int(info2["outer"][3])
+        if nw >= min(w, int(ow) + 30) or nh >= min(h, int(oh) + 30):
+            if abs(nw - w) < 40 and abs(nh - h) < 40:
+                return nw, nh
+            # 有变化但未到位，继续拖
+            ox, oy, ow, oh = info2["outer"]
+
+    # 2) HID 拖右下角（系统级，不编译新工具）
+    if _hid_drag_resize(ox, oy, ow, oh, w, h):
+        time.sleep(0.3)
+        info3 = window_info()
+        if info3:
+            return int(info3["outer"][2]), int(info3["outer"][3])
+
+    if text.startswith("ERR"):
+        log("WARN", "设置镜像尺寸：%s" % text)
+    info4 = window_info()
+    if info4:
+        return int(info4["outer"][2]), int(info4["outer"][3])
+    return None
+
+
+def _hid_drag_resize(ox, oy, ow, oh, tw, th):
+    """从窗口右下角拖到目标右下角，触发系统缩放。"""
+    try:
+        import Quartz
+    except Exception:
+        # ctypes 回退
+        return _hid_drag_resize_ctypes(ox, oy, ow, oh, tw, th)
+    try:
+        x0 = float(ox) + float(ow) - 2.0
+        y0 = float(oy) + float(oh) - 2.0
+        x1 = float(ox) + float(tw) - 2.0
+        y1 = float(oy) + float(th) - 2.0
+        # 略往外一点更容易抓到边缘
+        x0 = max(x0, float(ox) + 20)
+        y0 = max(y0, float(oy) + 40)
+
+        def post(etype, x, y, button=Quartz.kCGMouseButtonLeft):
+            ev = Quartz.CGEventCreateMouseEvent(None, etype, (x, y), button)
+            if ev:
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+
+        bring_front()
+        time.sleep(0.08)
+        post(Quartz.kCGEventMouseMoved, x0, y0)
+        time.sleep(0.05)
+        post(Quartz.kCGEventLeftMouseDown, x0, y0)
+        steps = 24
+        for i in range(1, steps + 1):
+            t = float(i) / steps
+            post(Quartz.kCGEventLeftMouseDragged, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+            time.sleep(0.008)
+        post(Quartz.kCGEventLeftMouseUp, x1, y1)
+        log("INFO", "已 HID 拖拽缩放 %sx%s → %sx%s" % (int(ow), int(oh), int(tw), int(th)))
+        return True
+    except Exception as e:
+        log("WARN", "HID 拖拽缩放失败：%s" % e)
+        return _hid_drag_resize_ctypes(ox, oy, ow, oh, tw, th)
+
+
+def _hid_drag_resize_ctypes(ox, oy, ow, oh, tw, th):
+    try:
+        import ctypes
+        import ctypes.util
+        path = ctypes.util.find_library("CoreGraphics") or "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+        cg = ctypes.CDLL(path)
+
+        class CGPoint(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+        cg.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+        cg.CGEventCreateMouseEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, CGPoint, ctypes.c_uint32]
+        cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+        # event types
+        moved, down, drag, up = 5, 1, 6, 2
+        hid_tap = 0
+
+        def post(etype, x, y):
+            ev = cg.CGEventCreateMouseEvent(None, etype, CGPoint(x, y), 0)
+            if ev:
+                cg.CGEventPost(hid_tap, ev)
+
+        x0 = float(ox) + float(ow) - 2.0
+        y0 = float(oy) + float(oh) - 2.0
+        x1 = float(ox) + float(tw) - 2.0
+        y1 = float(oy) + float(th) - 2.0
+        bring_front()
+        time.sleep(0.08)
+        post(moved, x0, y0)
+        time.sleep(0.05)
+        post(down, x0, y0)
+        for i in range(1, 25):
+            t = float(i) / 24.0
+            post(drag, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+            time.sleep(0.008)
+        post(up, x1, y1)
+        log("INFO", "已 ctypes HID 拖拽缩放 → %sx%s" % (int(tw), int(th)))
+        return True
+    except Exception as e:
+        log("WARN", "ctypes 拖拽失败：%s" % e)
+        return False
 
 
 def ensure_mirror_large(min_h=None, min_w=None, max_zoom=6, to_max=False):
-    """窗口偏小时用「显示 → 放大」(⌘+)；to_max=True 时一直放到不再变大。"""
+    """窗口偏小时：优先 ⌘+/⌘0 缩放，再 AX/拖拽改尺寸。"""
     info = window_info()
     if not info:
         return False
     ow, oh = float(info["outer"][2]), float(info["outer"][3])
     landscape = ow >= oh
-    # 横屏本身就矮，不能用竖屏高度阈值
     if min_h is None:
         min_h = 480 if landscape else MIRROR_MIN_H
     if min_w is None:
@@ -2625,44 +3315,68 @@ def ensure_mirror_large(min_h=None, min_w=None, max_zoom=6, to_max=False):
     if (not to_max) and oh >= min_h and ow >= min_w:
         log("INFO", "镜像窗口尺寸 OK：%sx%s" % (int(ow), int(oh)))
         return True
-    if to_max:
-        log("INFO", "镜像窗口放大到最大（当前 %sx%s）…" % (int(ow), int(oh)))
+
+    if landscape:
+        tw, th = MIRROR_TARGET_LAND
     else:
-        log("INFO", "镜像窗口偏小 %sx%s，正在放大以便识图…" % (int(ow), int(oh)))
-    last = (int(ow), int(oh))
+        tw, th = MIRROR_TARGET_PORT
+    if to_max:
+        tw, th = max(tw, min_w + 40), max(th, min_h + 40)
+
+    log("INFO", "镜像窗口偏小 %sx%s，正在放大（目标约 %sx%s）…" % (int(ow), int(oh), tw, th))
+    ensure_mirror_front(force=True)
+    time.sleep(0.12)
+
+    # 1) ⌘0 实际大小，再反复 ⌘+（对 iPhone 镜像最有效）
+    send_hotkey("cmd-0", focus=True)
+    time.sleep(0.35)
+    last = None
     stable = 0
-    start_area = ow * oh
-    rounds = 16 if to_max else max_zoom
+    rounds = 16 if to_max else max(8, max_zoom)
     for i in range(rounds):
-        text = osascript("larger")
-        if text.startswith("ERR"):
-            if not send_hotkey("cmd-+", focus=True):
-                break
-        time.sleep(0.4)
         info = window_info()
         if not info:
             break
         ow, oh = float(info["outer"][2]), float(info["outer"][3])
         cur = (int(ow), int(oh))
-        log("INFO", "放大 %s/%s → %sx%s" % (i + 1, rounds, cur[0], cur[1]))
-        # 放大过头偶发变成断线竖屏小窗，立刻停
-        if ow * oh < start_area * 0.55:
-            log("WARN", "放大后窗口异常缩小，停止放大")
-            break
-        if to_max:
-            if cur == last:
-                stable += 1
-                if stable >= 2:
-                    log("INFO", "镜像已到最大：%sx%s" % cur)
-                    return True
-            else:
-                stable = 0
-                last = cur
-            continue
+        if (not to_max) and oh >= min_h and ow >= min_w:
+            log("INFO", "镜像窗口已放大到 %sx%s" % cur)
+            return True
+        if to_max and ow >= tw - 20 and oh >= th - 20:
+            log("INFO", "镜像窗口已到目标附近 %sx%s" % cur)
+            return True
+        if cur == last:
+            stable += 1
+            if stable >= 2:
+                break
+        else:
+            stable = 0
+            last = cur
+        send_hotkey("cmd-+", focus=True)
+        time.sleep(0.32)
+        info2 = window_info()
+        if info2:
+            log("INFO", "⌘+ %s → %sx%s" % (i + 1, int(info2["outer"][2]), int(info2["outer"][3])))
+
+    info = window_info()
+    if info:
+        ow, oh = float(info["outer"][2]), float(info["outer"][3])
         if oh >= min_h and ow >= min_w:
             log("INFO", "镜像窗口已放大到 %sx%s" % (int(ow), int(oh)))
             return True
-    log("WARN", "镜像仍偏小 %sx%s，可手动：镜像菜单「显示 → 放大」" % (int(ow), int(oh)))
+
+    # 2) AX / HID 拖拽兜底
+    got = set_mirror_window_size(tw, th)
+    time.sleep(0.3)
+    info = window_info()
+    if info:
+        ow, oh = float(info["outer"][2]), float(info["outer"][3])
+        log("INFO", "设置/拖拽后：%sx%s（回报 %s）" % (int(ow), int(oh), got or "-"))
+        if oh >= min_h and ow >= min_w:
+            return True
+
+    log("WARN", "镜像仍偏小 %sx%s。可手动：显示→放大，或运行 python3 mirror_keeper.py --mirror-enlarge"
+        % (int(ow), int(oh)))
     return False
 
 
@@ -2720,7 +3434,11 @@ def ensure_mirror_ready():
 
 
 def unlock_if_needed():
+    if (not ALLOW_SCREEN_CAPTURE) or screen_tcc_denied():
+        return True
     text = ocr_text()
+    if screen_tcc_denied():
+        return True
     state = screen_state(text)
     log("INFO", "画面状态: %s" % state)
     if state == "connecting":
@@ -3019,12 +3737,15 @@ def type_search_and_open(config):
     if not send_text(name, focus=True):
         return False
     time.sleep(1.2)
-    hit = match_app_item(ocr_items(), keywords or [name])
-    if hit:
-        log("INFO", "搜索结果里找到 %s，点开" % hit.get("text"))
-        tap_ocr_item(hit, float(config.get("tap_above") or 0.02))
-        time.sleep(1.6)
-        return True
+    # 有截屏才 OCR 点结果；否则直接回车打开第一个
+    if ALLOW_SCREEN_CAPTURE and (not screen_tcc_denied()) and (not capture_denied()):
+        hit = match_app_item(ocr_items(), keywords or [name])
+        if hit:
+            log("INFO", "搜索结果里找到 %s，点开" % hit.get("text"))
+            tap_ocr_item(hit, float(config.get("tap_above") or 0.02))
+            time.sleep(1.6)
+            return True
+    log("INFO", "搜索后回车打开（不依赖识图）")
     send_hotkey("return")
     time.sleep(1.6)
     return True
@@ -3242,6 +3963,11 @@ def open_game_once(config, options=None):
     in_game, items = in_game_now(config)
     like = in_game or looks_like_game(items, config)
     if not like:
+        # 截屏关了/权限冷却时 OCR 永远空，不能因此卡死整条脚本
+        if (not ALLOW_SCREEN_CAPTURE) or screen_tcc_denied() or capture_denied():
+            log("WARN", "无法识图确认是否进游戏（截屏不可用），仍继续跑脚本步骤")
+            set_phase("game_playing")
+            return True
         save_shot("not_game")
         log("WARN", "没有进到游戏，回主屏幕")
         go_home()
@@ -3584,7 +4310,7 @@ def finish_hand_recording():
 
 
 def save_hand_recording(recording_id, name=None, group="yanyun"):
-    """把草稿正式保存到 configs/yanyun 或 configs/starrail。"""
+    """把草稿正式保存到 configs/<分组>/。"""
     rid = (recording_id or "").strip()
     if not rid:
         return None, "缺少录制 id"
@@ -3595,8 +4321,11 @@ def save_hand_recording(recording_id, name=None, group="yanyun"):
     if not steps:
         return None, "这次录制没有步骤"
     group = (group or "yanyun").strip()
-    if group not in ("yanyun", "starrail"):
-        return None, "只能保存到燕云(yanyun)或星穹铁道(starrail)"
+    if group not in known_group_ids():
+        created, err = create_group(group)
+        if not created:
+            return None, err or "分组无效"
+        group = created["id"]
     gname = group_display_name(group)
     display = (name or "").strip() or ("手点 " + datetime.datetime.now().strftime("%m-%d %H:%M"))
     cfg = {
@@ -4740,7 +5469,14 @@ def run_task(config, options=None, manage_session=True):
         if search_name or keywords:
             ok = open_game_once(config, options)
             if not ok:
-                record_error("打开游戏失败", search_name or "、".join(keywords))
+                # 打开失败时：若脚本本身有步骤，仍尽量继续（手校点击不依赖识图确认）
+                extra0 = config.get("steps") or []
+                if extra0 and ((not ALLOW_SCREEN_CAPTURE) or screen_tcc_denied() or capture_denied()):
+                    log("WARN", "打开游戏未确认成功，但截屏不可用且脚本有步骤 → 继续执行步骤")
+                    ok = True
+                    set_phase("game_playing")
+                else:
+                    record_error("打开游戏失败", search_name or "、".join(keywords))
         else:
             common = load_common()
             log("INFO", "先走通用前置：打开镜像并进入搜索页")
@@ -4748,8 +5484,10 @@ def run_task(config, options=None, manage_session=True):
     if ok and not should_stop():
         extra = config.get("steps") or []
         if extra:
-            log("INFO", "执行该脚本自己的步骤")
+            log("INFO", "执行该脚本自己的步骤（共 %s 步）" % len(extra))
             ok = run_steps(extra, config)
+        else:
+            log("INFO", "该脚本没有自定义步骤（只有打开游戏/搜索）")
     elif should_stop():
         log("WARN", "已终止，跳过关公告/遍历等后续步骤（若误触终止，请再点开始）")
         ok = False
@@ -4912,35 +5650,7 @@ def running_process_label():
 
 
 def check_accessibility():
-    """用 AXIsProcessTrusted 探测辅助功能。"""
-    check_src = os.path.join(ROOT, "scripts", "axcheck.swift")
-    check_bin = os.path.join(ROOT, "scripts", "axcheck")
-    if not os.path.isfile(check_src):
-        try:
-            with open(check_src, "w", encoding="utf-8") as f:
-                f.write(
-                    "import ApplicationServices\n"
-                    "print(AXIsProcessTrusted() ? \"yes\" : \"no\")\n"
-                )
-        except Exception:
-            return None
-    if (not os.path.isfile(check_bin)) or (
-        os.path.getmtime(check_bin) < os.path.getmtime(check_src)
-    ):
-        code = subprocess.call(
-            ["swiftc", "-O", "-o", check_bin, check_src],
-            cwd=ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if code != 0:
-            return None
-    code, out, err = run_cmd([check_bin], timeout=5)
-    text = (out or "").strip().lower()
-    if text == "yes":
-        return True
-    if text == "no":
-        return False
+    """不再探测辅助功能（探测/编译 axcheck 也可能折腾权限）。"""
     return None
 
 
@@ -4949,39 +5659,22 @@ _scr_probe_at = 0
 
 
 def check_screen_recording(force=False):
-    """永不主动 screencapture 探针（会弹权限并卡住）。"""
-    global _scr_probe_cache, _scr_probe_at
-    if _scr_probe_cache is not None and time.time() - _scr_probe_at < 3600:
-        return _scr_probe_cache
-    if os.path.isfile(SCREENSHOT) and os.path.getsize(SCREENSHOT) > 2000:
-        _scr_probe_cache = True
-        _scr_probe_at = time.time()
-        return True
-    # force 也不探针
+    """永不探测屏幕录制。"""
     return None
 
 
 def permission_report(probe_screen=False):
-    """权限摘要。永远不主动截图像素探针。"""
+    """权限摘要已停用，不再探测、不提示勾选。"""
     global _perm_hint
     who = running_process_label()
-    ax = check_accessibility()
-    lines = ["当前进程：%s" % who]
-    if ax is True:
-        lines.append("辅助功能：已授权")
-    elif ax is False:
-        lines.append("辅助功能：未授权 → 系统设置 → 隐私与安全性 → 辅助功能，勾选「%s」" % who)
-    else:
-        lines.append("辅助功能：无法检测")
-    lines.append("屏幕录制：不探测（避免弹窗）；若截图失败请到系统设置勾选「%s」" % who)
-    lines.append("提示：不要重编译/重签名工具，否则权限会再弹")
-    _perm_hint = " | ".join(lines)
+    _perm_hint = ""
     return {
         "who": who,
-        "accessibility": ax,
+        "accessibility": None,
         "screen_recording": None,
-        "hint": _perm_hint,
-        "lines": lines,
+        "hint": "",
+        "lines": [],
+        "disabled": True,
     }
 
 
@@ -5043,14 +5736,7 @@ def self_test():
     if text in ("yes", "no"):
         log("INFO", "AppleScript 进程检测正常: %s" % text)
     else:
-        print("警告: AppleScript 可能缺辅助功能权限: %s" % text)
-
-    perm = permission_report()
-    for line in perm.get("lines") or []:
-        print(line)
-        log("INFO", line)
-    if perm.get("accessibility") is False or not perm.get("screen_recording"):
-        ok = False
+        print("警告: AppleScript 可能失败: %s" % text)
 
     print("镜像进程: %s" % ("在" if process_running() else "不在"))
     print("镜像窗口: %s" % ("有" if has_window() else "无"))
@@ -5080,6 +5766,8 @@ def print_help():
     print("  python3 mirror_keeper.py --set-passcode")
     print("  python3 mirror_keeper.py --run yanyun")
     print("  python3 mirror_keeper.py --self-test")
+    print("  python3 mirror_keeper.py --mirror-size [宽] [高]   # 默认 450 980")
+    print("  python3 mirror_keeper.py --mirror-enlarge          # 自动放大到合适尺寸")
 
 
 def read_passcode_arg(argv):
@@ -5135,6 +5823,25 @@ def main():
         return 0 if set_passcode(pin) else 1
     if cmd == "--self-test":
         return self_test()
+    if cmd == "--mirror-size":
+        w = argv[2] if len(argv) >= 3 else MIRROR_TARGET_PORT[0]
+        h = argv[3] if len(argv) >= 4 else MIRROR_TARGET_PORT[1]
+        if not process_running() or not has_window():
+            print("请先打开 iPhone 镜像窗口")
+            return 1
+        print("当前:", window_bounds())
+        got = set_mirror_window_size(w, h)
+        time.sleep(0.3)
+        print("设置后:", window_bounds(), "回报", got)
+        return 0 if got else 1
+    if cmd == "--mirror-enlarge":
+        if not process_running() or not has_window():
+            print("请先打开 iPhone 镜像窗口")
+            return 1
+        print("当前:", window_bounds())
+        ok = ensure_mirror_large(to_max=True)
+        print("结果:", window_bounds(), "成功" if ok else "仍偏小")
+        return 0 if ok else 1
     if cmd == "--gui":
         from gui import run_gui
         run_gui()

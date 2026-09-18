@@ -45,7 +45,9 @@ class App:
         self.overlay_proc = None
         self.overlay_locked = False
         self.watch_proc = None
+        self.appwin_proc = None
         self.last_calibrate = None
+        self._restarting = False
         self.recording = False
         self.recording_count = 0
         self.recording_name = ""
@@ -271,8 +273,10 @@ class App:
                 }
             except Exception:
                 outer = None
-        mk.capture_window(force=False)
-        m = mk.current_metrics() or mk.refresh_metrics()
+        # 手校禁止再截图：screencapture 会弹「屏幕录制」。有 CG 用窗口几何即可。
+        m = mk.current_metrics()
+        if not m:
+            m = mk.refresh_metrics()
         fx = fy = None
         if data.get("fx") is not None and data.get("fy") is not None:
             try:
@@ -283,10 +287,27 @@ class App:
         spx = spy = None
         if cg and m:
             fx, fy = mk.coordlib.screen_to_outer(cg[0], cg[1], m)
-            spx, spy = mk.coordlib.screen_to_shot(cg[0], cg[1], m)
+            try:
+                spx, spy = mk.coordlib.screen_to_shot(cg[0], cg[1], m)
+            except Exception:
+                spx = spy = None
+        elif cg:
+            info = mk.window_info()
+            if not info:
+                return False, "找不到镜像窗口"
+            ox, oy, ow, oh = info["outer"]
+            if ow <= 0 or oh <= 0:
+                return False, "窗口尺寸无效"
+            fx = (cg[0] - ox) / float(ow)
+            fy = (cg[1] - oy) / float(oh)
+            if not isinstance(outer, dict):
+                outer = {"x": ox, "y": oy, "w": ow, "h": oh}
         elif fx is not None and fy is not None and m:
             cg = mk.coordlib.outer_to_screen(fx, fy, m)
-            spx, spy = mk.coordlib.screen_to_shot(cg[0], cg[1], m)
+            try:
+                spx, spy = mk.coordlib.screen_to_shot(cg[0], cg[1], m)
+            except Exception:
+                spx = spy = None
         elif fx is None or fy is None:
             return False, "坐标无效（需要 cg 或 fx/fy）"
         else:
@@ -458,6 +479,102 @@ class App:
         self.recording_count = 0
         self.recording_name = ""
         self.enqueue_log("[录制] 已取消")
+        return True, ""
+
+    def schedule_self_restart(self, rebuild=False):
+        """页面点「重启界面」：默认只拉起新 gui。
+        rebuild=True 会删掉并重编工具 → 新 CDHash → 系统再弹屏幕录制/辅助功能，日常禁止。
+        """
+        if self._restarting:
+            return False, "已经在重启"
+        if self.ui_state() != "idle":
+            try:
+                self.stop()
+            except Exception:
+                pass
+        if self.recording:
+            try:
+                self.cancel_recording()
+            except Exception:
+                pass
+        self._restarting = True
+        if rebuild:
+            self.enqueue_log("[重启] 将重编工具（会换 CDHash，可能再弹权限）后重启…")
+        else:
+            self.enqueue_log("[重启] 仅重启界面（不重编工具）…")
+
+        def _go():
+            time.sleep(0.35)
+            try:
+                stop_overlay()
+            except Exception:
+                pass
+            try:
+                mk.stop_f12_guardian()
+            except Exception:
+                pass
+            try:
+                mk.restore_mouse()
+            except Exception:
+                pass
+            try:
+                mk.stop_dotmark()
+            except Exception:
+                pass
+            if rebuild:
+                try:
+                    force_rebuild_tools()
+                except Exception as e:
+                    try:
+                        self.enqueue_log("[重启] 编译异常：%s（仍继续重启）" % e)
+                    except Exception:
+                        pass
+            try:
+                clear_pid()
+            except Exception:
+                pass
+            log_path = os.path.join(ROOT, "logs", "gui-launch.log")
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            try:
+                logf = open(log_path, "a")
+                logf.write("\n%s self-restart rebuild=%s\n" % (
+                    time.strftime("%Y-%m-%d %H:%M:%S"), rebuild,
+                ))
+                logf.flush()
+            except Exception:
+                logf = subprocess.DEVNULL
+            try:
+                subprocess.Popen(
+                    [sys.executable, os.path.join(ROOT, "gui.py")],
+                    cwd=ROOT,
+                    stdout=logf,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            except Exception as e:
+                try:
+                    self.enqueue_log("[重启] 拉起新进程失败：%s" % e)
+                except Exception:
+                    pass
+                self._restarting = False
+                return
+            try:
+                if self.appwin_proc and self.appwin_proc.poll() is None:
+                    self.appwin_proc.terminate()
+            except Exception:
+                pass
+            try:
+                subprocess.call(
+                    ["killall", "appwin"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+            time.sleep(0.2)
+            os._exit(0)
+
+        threading.Thread(target=_go, daemon=True).start()
         return True, ""
 
     def add_queue(self, sid):
@@ -781,14 +898,121 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(400, {"ok": False, "error": err or "删除失败"})
             return
+        elif path == "/api/script/get":
+            detail, err = mk.get_script_detail((data or {}).get("id"))
+            if detail:
+                self._json(200, {
+                    "ok": True,
+                    "script": detail,
+                    "step_types": mk.STEP_TYPE_CATALOG,
+                    "moyu_points": mk.moyu_points_summary(),
+                    "groups": [{"id": g["id"], "name": g["name"]} for g in mk.list_groups()],
+                })
+            else:
+                self._json(400, {"ok": False, "error": err or "找不到脚本"})
+            return
+        elif path == "/api/script/create":
+            detail, err = mk.create_script(
+                (data or {}).get("name"),
+                group=(data or {}).get("group") or "yanyun",
+                use_common=bool((data or {}).get("use_common", False)),
+            )
+            if detail:
+                APP.enqueue_log("[脚本] 已新建：%s" % detail.get("name"))
+                self._json(200, {"ok": True, "script": detail})
+            else:
+                self._json(400, {"ok": False, "error": err or "新建失败"})
+            return
+        elif path == "/api/group/create":
+            item, err = mk.create_group((data or {}).get("name"))
+            if item:
+                APP.enqueue_log("[分组] 已新建：%s" % item.get("name"))
+                self._json(200, {"ok": True, "group": item, "groups": mk.list_groups()})
+            else:
+                self._json(400, {"ok": False, "error": err or "新建失败"})
+            return
+        elif path == "/api/group/rename":
+            ok, err = mk.rename_group((data or {}).get("id"), (data or {}).get("name"))
+            if ok:
+                self._json(200, {"ok": True, "groups": mk.list_groups()})
+            else:
+                self._json(400, {"ok": False, "error": err or "重命名失败"})
+            return
+        elif path == "/api/group/delete":
+            ok, err = mk.delete_group((data or {}).get("id"))
+            if ok:
+                APP.enqueue_log("[分组] 已删除：%s" % ((data or {}).get("id") or ""))
+                self._json(200, {"ok": True, "groups": mk.list_groups()})
+            else:
+                self._json(400, {"ok": False, "error": err or "删除失败"})
+            return
+        elif path == "/api/script/meta":
+            ok, err = mk.update_script_meta((data or {}).get("id"), data or {})
+            if ok:
+                detail, _ = mk.get_script_detail((data or {}).get("id"))
+                self._json(200, {"ok": True, "script": detail})
+            else:
+                self._json(400, {"ok": False, "error": err or "保存失败"})
+            return
+        elif path == "/api/script/step/add":
+            ok, err, extra = mk.add_script_step(
+                (data or {}).get("id"),
+                step=(data or {}).get("step"),
+                kind=(data or {}).get("type") or (data or {}).get("kind"),
+            )
+            if ok:
+                self._json(200, {"ok": True, **(extra or {})})
+            else:
+                self._json(400, {"ok": False, "error": err or "新增失败"})
+            return
+        elif path == "/api/script/step/update":
+            ok, err, extra = mk.update_script_step(
+                (data or {}).get("id"),
+                (data or {}).get("index"),
+                (data or {}).get("step"),
+            )
+            if ok:
+                self._json(200, {"ok": True, **(extra or {})})
+            else:
+                self._json(400, {"ok": False, "error": err or "更新失败"})
+            return
+        elif path == "/api/script/step/delete":
+            ok, err, extra = mk.delete_script_step(
+                (data or {}).get("id"), (data or {}).get("index"),
+            )
+            if ok:
+                self._json(200, {"ok": True, **(extra or {})})
+            else:
+                self._json(400, {"ok": False, "error": err or "删除失败"})
+            return
+        elif path == "/api/script/step/move":
+            ok, err, extra = mk.move_script_step(
+                (data or {}).get("id"),
+                (data or {}).get("index"),
+                (data or {}).get("dir", 0),
+            )
+            if ok:
+                self._json(200, {"ok": True, **(extra or {})})
+            else:
+                self._json(400, {"ok": False, "error": err or "移动失败"})
+            return
         elif path == "/api/record/cancel":
             ok, err = APP.cancel_recording()
         elif path == "/api/perm-check":
-            # 默认不 force 截图像素探针，避免点自检就弹屏幕录制
-            report = mk.permission_report(probe_screen=False)
-            APP.enqueue_log("[权限] " + report.get("hint", ""))
-            ok, err = True, ""
-            self._json(200, {"ok": True, "perm": report})
+            # 权限自检已停用，不再探测、不弹窗
+            self._json(200, {"ok": True, "perm": {"disabled": True, "hint": ""}})
+            return
+        elif path == "/api/self-restart":
+            # 默认绝不重编：删 bin 重编会换 CDHash，屏幕录制/辅助功能再弹窗
+            rebuild = bool((data or {}).get("rebuild", False))
+            ok, err = APP.schedule_self_restart(rebuild=rebuild)
+            if ok:
+                self._json(200, {
+                    "ok": True,
+                    "msg": "正在重编并重启…" if rebuild else "正在重启界面…",
+                })
+            else:
+                self._json(400, {"ok": False, "error": err or "重启失败"})
             return
         if ok:
             self._json(200, {
@@ -828,6 +1052,47 @@ def ensure_clickwatch_bin():
         return True
     code = subprocess.call(["swiftc", "-O", "-o", WATCH_BIN, WATCH_SRC, "-framework", "Cocoa"], cwd=ROOT)
     return code == 0 and os.path.isfile(WATCH_BIN)
+
+
+def _remove_bin(path):
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def force_rebuild_tools():
+    """删掉旧二进制再按源码重编。会换 CDHash，系统常再弹屏幕录制/辅助功能——仅源码改了才该用。"""
+    APP.enqueue_log("[重启] 开始重编工具（会换身份，可能再弹权限）…")
+    # gui 侧
+    _remove_bin(OVERLAY_BIN)
+    _remove_bin(WATCH_BIN)
+    _remove_bin(APPWIN_BIN)
+    ok_overlay = ensure_overlay_bin()
+    ok_watch = ensure_clickwatch_bin()
+    ok_appwin = ensure_appwin()
+    # mirror_keeper 侧：删 bin 后 ensure 会触发 compile_tool
+    for bin_path in (
+        mk.CLICK_BIN, mk.HOTKEY_BIN, mk.WININFO_BIN, mk.OCR_BIN, mk.DOTMARK_BIN,
+    ):
+        _remove_bin(bin_path)
+    ok_click = mk.ensure_click_bin()
+    ok_hotkey = mk.ensure_hotkey_bin()
+    ok_win = mk.ensure_wininfo_bin()
+    ok_ocr = mk.ensure_ocr_bin()
+    ok_dot = mk.ensure_dotmark_bin()
+    parts = [
+        ("overlay", ok_overlay), ("clickwatch", ok_watch), ("appwin", ok_appwin),
+        ("click", ok_click), ("hotkey", ok_hotkey), ("wininfo", ok_win),
+        ("ocr", ok_ocr), ("dotmark", ok_dot),
+    ]
+    bad = [n for n, ok in parts if not ok]
+    if bad:
+        APP.enqueue_log("[重启] 编译失败：" + "、".join(bad))
+    else:
+        APP.enqueue_log("[重启] 工具已全部重编")
+    return not bad
 
 
 def stop_overlay():
@@ -871,12 +1136,7 @@ def run_gui():
     mk.start_f12_guardian(start_cb=f12_start_from_idle)
     mk.run_mode = "idle"
     APP.enqueue_log("全局快捷键：F12=砸开终止（立刻恢复鼠标）；F8=手动点完继续；空闲再按 F12=开始")
-    try:
-        report = mk.permission_report()
-        print("[权限] " + report.get("hint", ""), flush=True)
-        APP.enqueue_log("[权限] " + report.get("hint", ""))
-    except Exception as e:
-        print("权限自检跳过: %s" % e, flush=True)
+    APP.enqueue_log("[截屏] 已关闭主动截屏（不弹屏幕录制）；识图请用手校点位/已有截图")
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -894,9 +1154,9 @@ def run_gui():
     opened = False
     if ensure_appwin():
         try:
-            proc = subprocess.Popen([APPWIN_BIN, url])
+            APP.appwin_proc = subprocess.Popen([APPWIN_BIN, url])
             opened = True
-            proc.wait()
+            APP.appwin_proc.wait()
         except Exception as e:
             print("打开窗口失败：%s" % e, flush=True)
     if not opened:
