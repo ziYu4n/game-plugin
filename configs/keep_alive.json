@@ -1,0 +1,15 @@
+{
+  "id": "keep_alive",
+  "name": "仅保活镜像",
+  "description": "不走搜索，只打开镜像并看守。窗口没了会重连；解锁失败太多次会停止。",
+  "use_common": false,
+  "keep_alive": true,
+  "reconnect": true,
+  "watch_only": false,
+  "max_fail": 3,
+  "max_unlock": 3,
+  "steps": [
+    { "type": "ensure_mirror" },
+    { "type": "unlock_if_needed" }
+  ]
+}

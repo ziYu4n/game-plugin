@@ -1,0 +1,26 @@
+{
+  "id": "common",
+  "name": "通用前置",
+  "description": "所有脚本开始前都会走：打开 iPhone 镜像、解锁、回主屏幕、进入搜索页。单个配置文件只写搜什么、打开后做什么。",
+  "match": {
+    "back_min_score": 0.85,
+    "allow_fallback": true,
+    "max_fail": 6
+  },
+  "click": {
+    "mode": "soft",
+    "auto_tries": 2,
+    "manual_timeout": 90,
+    "note": "soft/pid=只注入镜像进程（不会点到脚本合集）；遍历用独立HID；hid=瞬移光标；assist=人手+F8"
+  },
+  "steps": [
+    { "type": "ensure_mirror" },
+    { "type": "unlock_if_needed" },
+    {
+      "type": "go_home",
+      "hotkey": "cmd-1",
+      "click_bar": true
+    },
+    { "type": "open_search" }
+  ]
+}

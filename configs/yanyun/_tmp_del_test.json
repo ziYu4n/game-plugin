@@ -1,0 +1,20 @@
+{
+  "id": "_tmp_del_test",
+  "group": "yanyun",
+  "group_name": "燕云十六声",
+  "name": "手点录制 09-17 16:25",
+  "order": 50,
+  "description": "共 6 步手点回放（只点坐标）",
+  "use_common": false,
+  "keep_alive": false,
+  "steps": [
+    {
+      "type": "replay_recording",
+      "name": "回放手点",
+      "recording_id": "_tmp_del_test",
+      "wait": 1.0,
+      "verify": false,
+      "required": true
+    }
+  ]
+}

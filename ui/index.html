@@ -1,0 +1,1117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>脚本合集</title>
+  <style>
+    :root {
+      --bg: #e9eaee;
+      --card: #ffffff;
+      --line: rgba(0,0,0,.08);
+      --text: #1d1d1f;
+      --muted: #6e6e73;
+      --blue: #0071e3;
+      --blue-soft: #e8f1fc;
+      --red: #c41e3a;
+      --shadow: 0 1px 2px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.04);
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      user-select: none;
+    }
+    .app {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      padding: 16px 18px 16px;
+      gap: 12px;
+    }
+    .head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      padding: 0 4px;
+    }
+    .head h1 { font-size: 22px; font-weight: 700; margin: 0; letter-spacing: -.03em; }
+    .meta { color: var(--muted); }
+    .meta .err { color: #b45309; margin-left: 12px; }
+    .cols {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 260px 280px 1fr;
+      gap: 12px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .card h2 {
+      margin: 0;
+      padding: 14px 16px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: .04em;
+    }
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-right: 12px;
+    }
+    .card-head h2 { padding-right: 0; }
+    .card-head button {
+      border: 0;
+      background: #f2f2f7;
+      border-radius: 8px;
+      padding: 5px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .card-head button:hover { background: #e5e5ea; }
+    .hint { padding: 0 16px 10px; color: var(--muted); font-size: 12px; }
+    .modal-mask {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.35);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .modal-mask.show { display: flex; }
+    .modal {
+      width: min(420px, 100%);
+      background: #fff;
+      border-radius: 14px;
+      box-shadow: 0 12px 40px rgba(0,0,0,.18);
+      padding: 18px 18px 14px;
+    }
+    .modal h3 { margin: 0 0 6px; font-size: 16px; }
+    .modal .desc { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+    .modal label.field {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .modal input[type="text"] {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+      margin-bottom: 12px;
+    }
+    .modal .groups {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .modal .groups label {
+      flex: 1;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .modal .groups label.active {
+      border-color: var(--blue);
+      background: var(--blue-soft);
+    }
+    .modal .actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .modal .actions button {
+      border: 0;
+      background: #f2f2f7;
+      border-radius: 8px;
+      padding: 8px 14px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .modal .actions button.primary {
+      background: var(--blue);
+      color: #fff;
+    }
+    .modal .actions button.danger {
+      background: #fff0f0;
+      color: var(--red);
+      margin-right: auto;
+    }
+    .list { flex: 1; overflow: auto; padding: 0 8px 10px; }
+    .item {
+      width: 100%;
+      text-align: left;
+      border: 0;
+      background: transparent;
+      border-radius: 10px;
+      padding: 10px 12px;
+      cursor: pointer;
+      color: var(--text);
+      font: inherit;
+    }
+    .item:hover { background: #f3f4f6; }
+    .item.active { background: var(--blue-soft); }
+    .item .name { font-weight: 600; display: block; }
+    .item .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .group { margin-bottom: 4px; }
+    .group-title {
+      width: 100%;
+      text-align: left;
+      border: 0;
+      background: transparent;
+      border-radius: 10px;
+      padding: 9px 10px;
+      cursor: pointer;
+      color: var(--text);
+      font: inherit;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .group-title:hover { background: #f3f4f6; }
+    .group-title .arrow { color: var(--muted); width: 12px; }
+    .group-body { display: none; padding: 0 0 4px 12px; }
+    .group.open .group-body { display: block; }
+    .group .item { padding: 8px 10px; }
+    .group .item-row {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin: 0 4px 2px;
+    }
+    .group .item-row .item { flex: 1; min-width: 0; }
+    .group .item-del {
+      flex: 0 0 auto;
+      border: 0;
+      background: transparent;
+      color: var(--red);
+      font: inherit;
+      font-size: 11px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      cursor: pointer;
+      opacity: .75;
+    }
+    .group .item-del:hover { background: #fff0f0; opacity: 1; }
+    .group .empty { padding: 8px 10px; font-size: 12px; }
+    .qbtns { display: flex; gap: 6px; padding: 0 12px 12px; }
+    .qbtns button, .bar button {
+      border: 0;
+      background: #f2f2f7;
+      border-radius: 8px;
+      padding: 6px 10px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .qbtns button:hover, .bar button:hover { background: #e5e5ea; }
+    .qbtns button:disabled, .bar button:disabled { opacity: .4; cursor: default; }
+    .logs {
+      flex: 1;
+      overflow: auto;
+      margin: 0 12px 12px;
+      padding: 10px 12px;
+      background: #0f1115;
+      color: #d7dce3;
+      border-radius: 10px;
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap;
+      word-break: break-all;
+      cursor: text;
+      -webkit-user-select: text;
+      user-select: text;
+    }
+    .shot-wrap {
+      display: none;
+      position: relative;
+      margin: 0 12px 8px;
+      align-self: center;
+      cursor: zoom-in;
+    }
+    .shot-wrap.show { display: inline-block; }
+    .shot-wrap img {
+      max-height: 180px;
+      max-width: 220px;
+      display: block;
+      background: #111;
+      border-radius: 10px;
+    }
+    .shot-wrap .shot-tip {
+      position: absolute;
+      left: 8px;
+      bottom: 8px;
+      padding: 2px 6px;
+      border-radius: 6px;
+      background: rgba(0,0,0,.55);
+      color: #fff;
+      font-size: 11px;
+      pointer-events: none;
+    }
+    .shot-thumbs {
+      display: none;
+      gap: 6px;
+      padding: 0 12px 10px;
+      overflow-x: auto;
+      flex-shrink: 0;
+    }
+    .shot-thumbs.show { display: flex; }
+    .shot-thumbs button {
+      flex: 0 0 auto;
+      border: 1px solid var(--line);
+      background: #111;
+      border-radius: 8px;
+      padding: 0;
+      width: 52px;
+      height: 72px;
+      overflow: hidden;
+      cursor: zoom-in;
+    }
+    .shot-thumbs button.active { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(0,113,227,.25); }
+    .shot-thumbs img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .shot-dot {
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      margin: -7px 0 0 -7px;
+      border: 2px solid #ff3b30;
+      background: rgba(255, 59, 48, .45);
+      border-radius: 50%;
+      pointer-events: none;
+      box-shadow: 0 0 0 2px rgba(255,255,255,.7);
+    }
+    .shot-lightbox {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 2000;
+      background: rgba(0,0,0,.72);
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      cursor: zoom-out;
+    }
+    .shot-lightbox.show { display: flex; }
+    .shot-lightbox img {
+      max-width: min(92vw, 1100px);
+      max-height: 90vh;
+      border-radius: 12px;
+      box-shadow: 0 16px 48px rgba(0,0,0,.45);
+      background: #111;
+      cursor: default;
+    }
+    .shot-lightbox .lb-cap {
+      position: absolute;
+      left: 50%;
+      bottom: 18px;
+      transform: translateX(-50%);
+      color: #fff;
+      font-size: 12px;
+      background: rgba(0,0,0,.45);
+      padding: 4px 10px;
+      border-radius: 8px;
+      pointer-events: none;
+    }
+    .logs .shot-link {
+      color: var(--blue);
+      text-decoration: underline;
+      cursor: zoom-in;
+    }
+    .bottom {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .account {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 168px;
+      max-width: 240px;
+    }
+    .account img {
+      height: 40px;
+      max-width: 120px;
+      border-radius: 8px;
+      background: #111;
+      object-fit: contain;
+    }
+    .account .label { font-size: 11px; color: var(--muted); }
+    .account .name { font-weight: 600; font-size: 14px; }
+    .account.empty .name { color: var(--muted); font-weight: 400; }
+    .bottom-main { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+    .switches { display: flex; flex-wrap: wrap; gap: 16px; color: var(--text); }
+    .switches label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .bar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .bar .lock-on { background: #fff4e5; color: #9a5b00; }
+    .bar .lock-off { background: #e8f8ee; color: #1a7f37; }
+    .bar .primary:hover { background: #0060c2; }
+    .bar .danger { background: #f8e8eb; color: var(--red); }
+    .calib-row {
+      display: flex; flex-direction: column; gap: 8px;
+      margin-top: 8px; color: var(--muted); font-size: 12px;
+    }
+    .calib-head {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    }
+    .calib-head input {
+      font: inherit; border: 1px solid var(--line); border-radius: 8px;
+      padding: 5px 8px; background: #fff; color: var(--text); min-width: 120px;
+    }
+    .calib-list {
+      display: flex; flex-direction: column; gap: 4px;
+      max-height: 140px; overflow: auto;
+      border: 1px solid var(--line); border-radius: 10px;
+      background: #fafafa; padding: 4px;
+    }
+    .calib-item {
+      display: flex; align-items: center; gap: 6px;
+      padding: 5px 8px; border-radius: 8px; background: #fff;
+      border: 1px solid transparent; cursor: pointer;
+    }
+    .calib-item:hover { border-color: var(--line); }
+    .calib-item.active { border-color: var(--blue); background: var(--blue-soft); }
+    .calib-item .name { flex: 1; color: var(--text); font-weight: 500; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .calib-item .xy { font-variant-numeric: tabular-nums; min-width: 72px; }
+    .calib-item .ok { color: #1a7f37; }
+    .calib-item .miss { color: #9a5b00; }
+    .calib-item .ops { display: flex; gap: 2px; }
+    .calib-item .ops button {
+      border: 0; background: #f2f2f7; border-radius: 6px;
+      padding: 2px 6px; font: inherit; font-size: 11px; cursor: pointer; color: var(--text);
+    }
+    .calib-item .ops button:hover { background: #e5e5ea; }
+    .calib-item .ops button.danger { color: var(--red); background: #f8e8eb; }
+    .calib-hint { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="head">
+      <h1>脚本合集</h1>
+      <div class="meta">
+        <span id="state">当前状态：未开始</span>
+        <span id="hotkeyTip" style="margin-left:12px;opacity:.75;font-size:12px;">F12/F8 全局热键 · F12砸开终止 · F8继续</span>
+        <span class="err" id="errors">未清除错误：0 条</span>
+      </div>
+    </div>
+    <div class="cols">
+      <section class="card">
+        <h2>脚本列表</h2>
+        <div class="hint">双击添加</div>
+        <div class="list" id="scripts"></div>
+      </section>
+      <section class="card">
+        <h2>执行列表</h2>
+        <div class="hint">双击取消</div>
+        <div class="list" id="queue"></div>
+        <div class="qbtns">
+          <button id="up">上移</button>
+          <button id="down">下移</button>
+          <button id="del">移除</button>
+          <button id="clearQ">清空</button>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-head">
+          <h2>运行日志</h2>
+          <button id="copyLogs" type="button">复制全部</button>
+        </div>
+        <div class="shot-wrap" id="shotWrap" title="点击放大预览">
+          <img id="shotImg" alt="校验截图" />
+          <div class="shot-dot" id="shotDot" hidden></div>
+          <div class="shot-tip">点击放大</div>
+        </div>
+        <div class="shot-thumbs" id="shotThumbs"></div>
+        <div class="logs" id="logs"></div>
+      </section>
+    </div>
+    <div class="shot-lightbox" id="shotLightbox">
+      <img id="shotLightboxImg" alt="预览" />
+      <div class="lb-cap" id="shotLightboxCap"></div>
+    </div>
+    <div class="bottom">
+      <div class="account empty" id="accountBox">
+        <img id="accountImg" alt="" hidden />
+        <div>
+          <div class="label">当前账号</div>
+          <div class="name" id="accountName">还未识别</div>
+        </div>
+      </div>
+      <div class="bottom-main">
+      <div class="switches">
+        <label><input type="checkbox" id="kill" checked /> 智能启动（一般不必强杀镜像；横竖屏都跑）</label>
+        <label><input type="checkbox" id="watch" checked /> 窗口没了就停止</label>
+        <label><input type="checkbox" id="reconnect" /> 断线自动重连</label>
+      </div>
+      <div class="bar">
+        <button class="primary" id="start">开始</button>
+        <button id="pause">暂停</button>
+        <button id="stop">终止</button>
+        <button id="lockGame">锁定游戏</button>
+        <button id="unlockGame">解锁游戏</button>
+        <button id="recStart">开始录制</button>
+        <button id="recStop">结束录制</button>
+        <button id="recCancel">取消录制</button>
+        <button id="permCheck">权限自检</button>
+        <button class="danger" id="clearErr">清空错误</button>
+      </div>
+      <div class="calib-row">
+        <div class="calib-head">
+          <span>手校点位</span>
+          <input id="calibNewName" type="text" placeholder="新名称，如：菜单按钮" />
+          <button type="button" id="calibAdd">新增</button>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:var(--text)">
+            <input type="checkbox" id="calibRetap" checked /> 校准后复点（白名单）
+          </label>
+          <span class="calib-hint" id="calibHint">点一行选中 → 锁定游戏 → 点镜像；可上下排序</span>
+        </div>
+        <div class="calib-list" id="calibList"></div>
+      </div>
+      </div>
+    </div>
+  </div>
+  <div class="modal-mask" id="saveModal">
+    <div class="modal">
+      <h3>保存手点录制</h3>
+      <div class="desc" id="saveModalDesc">录制已结束，请保存到游戏目录（不会自动删除）。</div>
+      <label class="field" for="saveName">脚本名称</label>
+      <input type="text" id="saveName" placeholder="例如：进游戏点继续" />
+      <div class="field">保存到</div>
+      <div class="groups" id="saveGroups">
+        <label class="active" data-group="yanyun"><input type="radio" name="saveGroup" value="yanyun" checked /> 燕云十六声<br /><span style="color:#6e6e73;font-size:11px">configs/yanyun/</span></label>
+        <label data-group="starrail"><input type="radio" name="saveGroup" value="starrail" /> 星穹铁道<br /><span style="color:#6e6e73;font-size:11px">configs/starrail/</span></label>
+      </div>
+      <div class="actions">
+        <button class="danger" id="saveDiscard">丢弃</button>
+        <button id="saveCancel">稍后</button>
+        <button class="primary" id="saveConfirm">保存</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal-mask" id="delModal">
+    <div class="modal">
+      <h3>删除手点脚本</h3>
+      <div class="desc" id="delModalDesc">确定删除？配置和录制数据都会清掉，不可恢复。</div>
+      <div class="actions">
+        <button id="delCancel">取消</button>
+        <button class="danger" id="delConfirm">确定删除</button>
+      </div>
+    </div>
+  </div>
+  <script>
+    let selected = null;
+    let lastLogCount = -1;
+    let pendingSave = null;
+    let pendingDelete = null;
+    let currentShotRun = "";
+    let lastThumbKey = "";
+    let previewSrc = "";
+    let uiIdle = true;
+    const stateText = { idle: "未开始", running: "运行中", paused: "已暂停", stop: "正在停止" };
+
+    function shotUrl(run, name, ts) {
+      return "/api/shot/file?run=" + encodeURIComponent(run || "") +
+        "&name=" + encodeURIComponent(name || "") +
+        (ts ? ("&t=" + ts) : "");
+    }
+
+    function openShotPreview(src, cap) {
+      previewSrc = src || "";
+      const box = document.getElementById("shotLightbox");
+      const img = document.getElementById("shotLightboxImg");
+      const label = document.getElementById("shotLightboxCap");
+      img.src = src || "";
+      label.textContent = cap || "校验截图预览（点击空白关闭）";
+      box.classList.add("show");
+    }
+
+    function closeShotPreview() {
+      document.getElementById("shotLightbox").classList.remove("show");
+    }
+
+    function renderShotThumbs(list, activeName) {
+      const box = document.getElementById("shotThumbs");
+      const key = JSON.stringify(list || []) + "|" + (activeName || "");
+      if (key === lastThumbKey) return;
+      lastThumbKey = key;
+      box.innerHTML = "";
+      if (!list || !list.length) {
+        box.classList.remove("show");
+        return;
+      }
+      box.classList.add("show");
+      list.forEach(function (item) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.title = item.name || "";
+        if (activeName && item.name === activeName) btn.className = "active";
+        const img = document.createElement("img");
+        img.alt = item.name || "";
+        img.src = shotUrl(item.run, item.name, item.ts);
+        btn.appendChild(img);
+        btn.onclick = function () {
+          openShotPreview(img.src, item.name || "");
+          // 同步主预览
+          const main = document.getElementById("shotImg");
+          main.src = img.src;
+          main.setAttribute("data-src", img.src);
+          document.getElementById("shotWrap").classList.add("show");
+        };
+        box.appendChild(btn);
+      });
+    }
+
+    function escapeHtml(s) {
+      return String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    function renderLogsHtml(lines) {
+      const run = currentShotRun || "";
+      return (lines || []).map(function (line) {
+        const text = String(line || "");
+        // 已保存校验截图 001_xxx.png
+        const m1 = text.match(/已保存校验截图\s+([A-Za-z0-9._-]+\.png)/);
+        if (m1 && run) {
+          const name = m1[1];
+          const url = shotUrl(run, name);
+          const safe = escapeHtml(text);
+          const link = '<span class="shot-link" data-src="' + url + '" data-cap="' + escapeHtml(name) + '">' +
+            escapeHtml(name) + "</span>";
+          return safe.replace(escapeHtml(name), link);
+        }
+        // 本轮校验截图：logs/shots/20260918-100713
+        const m2 = text.match(/本轮校验截图：logs\/shots\/([0-9-]+)/);
+        if (m2) {
+          currentShotRun = m2[1];
+        }
+        return escapeHtml(text);
+      }).join("\n");
+    }
+
+    function post(path, body) {
+      return fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {})
+      }).then(function (r) { return r.json(); });
+    }
+
+    function options() {
+      return {
+        kill_mirror: document.getElementById("kill").checked,
+        watch_lost: document.getElementById("watch").checked,
+        reconnect: document.getElementById("reconnect").checked
+      };
+    }
+
+    let expanded = {};
+    let lastTreeKey = "";
+    function render(data) {
+      document.getElementById("state").textContent = "当前状态：" + (stateText[data.state] || data.state)
+        + (data.phase ? " · " + data.phase : "");
+      const idle = data.state === "idle";
+      uiIdle = idle;
+      const acc = data.account || "";
+      const box = document.getElementById("accountBox");
+      const img = document.getElementById("accountImg");
+      const shot = document.getElementById("shotImg");
+      const shotWrap = document.getElementById("shotWrap");
+      const shotDot = document.getElementById("shotDot");
+      document.getElementById("accountName").textContent = acc || "还未识别";
+      if (acc) box.classList.remove("empty");
+      else box.classList.add("empty");
+      if (acc && data.account_ts) {
+        const src = "/api/account.png?t=" + data.account_ts;
+        if (img.getAttribute("data-src") !== src) {
+          img.src = src;
+          img.setAttribute("data-src", src);
+        }
+        img.hidden = false;
+      } else {
+        img.hidden = true;
+      }
+        if (data.shot_ts) {
+          const src = "/api/shot.png?t=" + data.shot_ts;
+          if (shot.getAttribute("data-src") !== src) {
+            shot.src = src;
+            shot.setAttribute("data-src", src);
+          }
+          shotWrap.classList.add("show");
+          // 红点按截图像素，不再用 outer 的 fx/fy 当图片百分比
+          if (data.shot_px != null && data.shot_py != null && data.shot_w > 0 && data.shot_h > 0) {
+            shotDot.style.left = ((data.shot_px / data.shot_w) * 100) + "%";
+            shotDot.style.top = ((data.shot_py / data.shot_h) * 100) + "%";
+            shotDot.hidden = false;
+          } else if (data.shot_fx != null && data.shot_fy != null) {
+            shotDot.style.left = (data.shot_fx * 100) + "%";
+            shotDot.style.top = (data.shot_fy * 100) + "%";
+            shotDot.hidden = false;
+          } else {
+            shotDot.hidden = true;
+          }
+        } else {
+          shotWrap.classList.remove("show");
+        }
+        if (data.shot_run) currentShotRun = data.shot_run;
+        const lastName = (data.shot_last && data.shot_last.name) || "";
+        renderShotThumbs(data.shot_thumbs || [], lastName);
+      document.getElementById("start").disabled = !idle;
+      document.getElementById("pause").disabled = idle || data.state === "stop";
+      document.getElementById("stop").disabled = idle;
+      document.getElementById("pause").textContent = data.state === "paused" ? "继续" : "暂停";
+      const lockBtn = document.getElementById("lockGame");
+      const unlockBtn = document.getElementById("unlockGame");
+      if (data.overlay_locked) {
+        lockBtn.className = "lock-on";
+        unlockBtn.className = "";
+        lockBtn.textContent = "已锁定";
+      } else {
+        lockBtn.className = "";
+        unlockBtn.className = "lock-off";
+        lockBtn.textContent = "锁定游戏";
+      }
+      renderCalibList(data.moyu_points || [], data.calib_target || "", !!data.overlay_locked);
+      var retapBox = document.getElementById("calibRetap");
+      if (retapBox && document.activeElement !== retapBox) {
+        retapBox.checked = data.calib_retap !== false;
+      }
+      let errText = "未清除错误：" + data.error_count + " 条";
+      if (data.last_calibrate && data.last_calibrate.fx != null) {
+        errText += " · 上次点位 " +
+          Number(data.last_calibrate.fx).toFixed(3) + ", " +
+          Number(data.last_calibrate.fy).toFixed(3);
+        if (data.last_calibrate.cg_click) {
+          errText += " → CG " + data.last_calibrate.cg_click.join(",");
+        }
+      }
+      if (data.recording) {
+        errText = "录制中 · 已记 " + (data.recording_count || 0) + " 步" +
+          (data.recording_name ? " · " + data.recording_name : "") +
+          " · 未清除错误：" + data.error_count + " 条";
+      }
+      if (data.perm_hint && data.perm_hint.indexOf("未授权") >= 0) {
+        errText += " · " + data.perm_hint.split(" | ")[0];
+      }
+      document.getElementById("errors").textContent = errText;
+      const recStart = document.getElementById("recStart");
+      const recStop = document.getElementById("recStop");
+      const recCancel = document.getElementById("recCancel");
+      recStart.disabled = !idle || !!data.recording;
+      recStop.disabled = !data.recording;
+      recCancel.disabled = !data.recording;
+      if (data.recording) {
+        recStart.className = "lock-on";
+        recStart.textContent = "录制中 " + (data.recording_count || 0);
+      } else {
+        recStart.className = "";
+        recStart.textContent = "开始录制";
+      }
+      ["up", "down", "del", "clearQ"].forEach(function (id) {
+        document.getElementById(id).disabled = !idle;
+      });
+
+      const scripts = document.getElementById("scripts");
+      const groups = data.groups || [];
+      const treeKey = JSON.stringify(groups) + (idle ? "1" : "0");
+      if (treeKey !== lastTreeKey) {
+        lastTreeKey = treeKey;
+        scripts.innerHTML = "";
+        if (!groups.length) {
+          scripts.innerHTML = '<div class="empty">还没有脚本配置</div>';
+        } else {
+          groups.forEach(function (g) {
+            if (expanded[g.id] === undefined) expanded[g.id] = g.id === "yanyun";
+            const wrap = document.createElement("div");
+            wrap.className = "group" + (expanded[g.id] ? " open" : "");
+            const title = document.createElement("button");
+            title.className = "group-title";
+            title.innerHTML = '<span class="arrow"></span><span class="name"></span>';
+            title.querySelector(".arrow").textContent = expanded[g.id] ? "▾" : "▸";
+            title.querySelector(".name").textContent = g.name;
+            title.onclick = function () {
+              expanded[g.id] = !expanded[g.id];
+              lastTreeKey = "";
+            };
+            const body = document.createElement("div");
+            body.className = "group-body";
+            const kids = g.scripts || [];
+            if (!kids.length) {
+              body.innerHTML = '<div class="empty">暂无脚本</div>';
+            } else {
+              kids.forEach(function (item) {
+                const row = document.createElement("div");
+                row.className = "item-row";
+                const btn = document.createElement("button");
+                btn.className = "item";
+                btn.innerHTML = '<span class="name"></span>';
+                btn.querySelector(".name").textContent = item.name + (item.recorded ? " ·录制" : "");
+                btn.ondblclick = function () { if (idle) post("/api/queue/add", { id: item.id }); };
+                row.appendChild(btn);
+                if (item.deletable) {
+                  const del = document.createElement("button");
+                  del.type = "button";
+                  del.className = "item-del";
+                  del.textContent = "删除";
+                  del.title = "删除此手点录制脚本";
+                  del.onclick = function (e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    openDelModal(item);
+                  };
+                  row.appendChild(del);
+                }
+                body.appendChild(row);
+              });
+            }
+            wrap.appendChild(title);
+            wrap.appendChild(body);
+            scripts.appendChild(wrap);
+          });
+        }
+      }
+
+      const queue = document.getElementById("queue");
+      queue.innerHTML = "";
+      if (!data.queue.length) {
+        queue.innerHTML = '<div class="empty">还没有任务<br/>双击左侧添加</div>';
+        selected = null;
+      } else {
+        if (selected != null && selected >= data.queue.length) selected = null;
+        data.queue.forEach(function (item, i) {
+          const btn = document.createElement("button");
+          btn.className = "item" + (selected === i ? " active" : "");
+          btn.innerHTML = '<span class="name"></span>';
+          btn.querySelector(".name").textContent = (i + 1) + ". " + item.name;
+          btn.onclick = function () { selected = i; };
+          btn.ondblclick = function () {
+            if (idle) post("/api/queue/remove", { index: i }).then(function () { selected = null; });
+          };
+          queue.appendChild(btn);
+        });
+      }
+
+      if (data.logs.length !== lastLogCount) {
+        const box = document.getElementById("logs");
+        const sel = window.getSelection();
+        const selecting = sel && !sel.isCollapsed && box.contains(sel.anchorNode);
+        if (!selecting) {
+          lastLogCount = data.logs.length;
+          const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+          if (data.shot_run) currentShotRun = data.shot_run;
+          box.innerHTML = renderLogsHtml(data.logs) || "等待开始…";
+          if (atBottom) box.scrollTop = box.scrollHeight;
+        }
+      }
+    }
+
+    function tick() {
+      fetch("/api/state").then(function (r) { return r.json(); }).then(render).catch(function () {});
+    }
+
+    document.getElementById("up").onclick = function () {
+      if (selected == null) return;
+      post("/api/queue/move", { index: selected, dir: -1 }).then(function (r) {
+        if (r.ok && selected > 0) selected -= 1;
+      });
+    };
+    document.getElementById("down").onclick = function () {
+      if (selected == null) return;
+      post("/api/queue/move", { index: selected, dir: 1 }).then(function (r) {
+        if (r.ok) selected += 1;
+      });
+    };
+    document.getElementById("del").onclick = function () {
+      if (selected == null) return;
+      post("/api/queue/remove", { index: selected }).then(function () { selected = null; });
+    };
+    document.getElementById("clearQ").onclick = function () {
+      post("/api/queue/clear").then(function () { selected = null; });
+    };
+    document.getElementById("start").onclick = function () { post("/api/start", options()); };
+    document.getElementById("pause").onclick = function () { post("/api/pause"); };
+    document.getElementById("stop").onclick = function () { post("/api/stop"); };
+    document.getElementById("lockGame").onclick = function () { post("/api/overlay/lock"); };
+    document.getElementById("unlockGame").onclick = function () { post("/api/overlay/unlock"); };
+
+    var calibSelected = "";
+    function escHtml(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+    function renderCalibList(pts, selected, locked) {
+      calibSelected = selected || "";
+      var box = document.getElementById("calibList");
+      var hint = document.getElementById("calibHint");
+      if (!box) return;
+      if (!pts.length) {
+        box.innerHTML = "<div style=\"padding:8px;color:#6e6e73\">暂无点位，上面输入名称点「新增」</div>";
+      } else {
+        box.innerHTML = pts.map(function (p) {
+          var cls = "calib-item" + (p.key === calibSelected ? " active" : "");
+          var xyCls = p.ok ? "ok" : "miss";
+          var xy = p.ok
+            ? (Number(p.fx).toFixed(2) + "," + Number(p.fy).toFixed(2))
+            : "未校";
+          if (p.ok && p.has_anchor) xy += "⚓";
+          return "<div class=\"" + cls + "\" data-key=\"" + escHtml(p.key) + "\">" +
+            "<span class=\"name\" title=\"" + escHtml(p.key) + " · " + escHtml(p.scope || "") + "\">" + escHtml(p.label) + "</span>" +
+            "<span class=\"xy " + xyCls + "\">" + xy + "</span>" +
+            "<span class=\"ops\">" +
+            "<button type=\"button\" data-act=\"up\" title=\"上移\">↑</button>" +
+            "<button type=\"button\" data-act=\"down\" title=\"下移\">↓</button>" +
+            "<button type=\"button\" data-act=\"rename\" title=\"改名\">改</button>" +
+            "<button type=\"button\" data-act=\"clear\" title=\"清空坐标\">清</button>" +
+            "<button type=\"button\" class=\"danger\" data-act=\"del\" title=\"删除\">删</button>" +
+            "</span></div>";
+        }).join("");
+      }
+      if (hint) {
+        if (calibSelected) {
+          var lab = "";
+          for (var i = 0; i < pts.length; i++) {
+            if (pts[i].key === calibSelected) { lab = pts[i].label; break; }
+          }
+          hint.textContent = locked
+            ? ("已锁定，请点镜像上的「" + lab + "」")
+            : ("已选「" + lab + "」→ 点锁定游戏 → 再点镜像");
+        } else {
+          hint.textContent = "点一行选中 → 锁定游戏 → 点镜像；可上下排序";
+        }
+      }
+    }
+    document.getElementById("calibList").onclick = function (e) {
+      var btn = e.target.closest("button[data-act]");
+      var row = e.target.closest(".calib-item");
+      if (!row) return;
+      var key = row.getAttribute("data-key") || "";
+      if (btn) {
+        e.stopPropagation();
+        var act = btn.getAttribute("data-act");
+        if (act === "up") {
+          post("/api/calib/move", { key: key, dir: -1 });
+        } else if (act === "down") {
+          post("/api/calib/move", { key: key, dir: 1 });
+        } else if (act === "rename") {
+          var cur = (row.querySelector(".name") || {}).textContent || "";
+          var name = window.prompt("改名", cur);
+          if (name != null && String(name).trim()) {
+            post("/api/calib/rename", { key: key, label: String(name).trim() });
+          }
+        } else if (act === "clear") {
+          post("/api/calib/clear", { key: key });
+        } else if (act === "del") {
+          if (window.confirm("删除点位「" + ((row.querySelector(".name") || {}).textContent || key) + "」？")) {
+            post("/api/calib/delete", { key: key });
+          }
+        }
+        return;
+      }
+      post("/api/calib/target", { key: key });
+    };
+    document.getElementById("calibAdd").onclick = function () {
+      var input = document.getElementById("calibNewName");
+      var name = (input.value || "").trim();
+      if (!name) {
+        input.focus();
+        return;
+      }
+      post("/api/calib/add", { label: name }).then(function () {
+        input.value = "";
+      });
+    };
+    document.getElementById("calibRetap").onchange = function () {
+      post("/api/calib/retap", { enabled: !!this.checked });
+    };
+    document.getElementById("calibNewName").onkeydown = function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        document.getElementById("calibAdd").click();
+      }
+    };
+    function showSaveModal(p) {
+      pendingSave = p;
+      document.getElementById("saveModalDesc").textContent =
+        "共 " + (p.steps || 0) + " 步。选好名字和游戏目录后点「保存」。点「稍后」不会删除。";
+      document.getElementById("saveName").value = p.name || "";
+      document.querySelectorAll("#saveGroups label").forEach(function (el) {
+        var on = el.getAttribute("data-group") === "yanyun";
+        el.classList.toggle("active", on);
+        el.querySelector("input").checked = on;
+      });
+      document.getElementById("saveModal").classList.add("show");
+      setTimeout(function () {
+        var input = document.getElementById("saveName");
+        input.focus();
+        input.select();
+      }, 50);
+    }
+    function hideSaveModal() {
+      document.getElementById("saveModal").classList.remove("show");
+    }
+    document.querySelectorAll("#saveGroups label").forEach(function (el) {
+      el.onclick = function () {
+        document.querySelectorAll("#saveGroups label").forEach(function (x) { x.classList.remove("active"); });
+        el.classList.add("active");
+        el.querySelector("input").checked = true;
+      };
+    });
+    document.getElementById("saveConfirm").onclick = function () {
+      if (!pendingSave || !pendingSave.id) return;
+      var name = (document.getElementById("saveName").value || "").trim() || pendingSave.name || "手点录制";
+      var groupEl = document.querySelector('input[name="saveGroup"]:checked');
+      var group = groupEl ? groupEl.value : "yanyun";
+      post("/api/record/save", { id: pendingSave.id, name: name, group: group }).then(function (r) {
+        if (!r.ok) {
+          document.getElementById("saveModalDesc").textContent = r.error || "保存失败，请重试";
+          return;
+        }
+        var path = (r.saved && r.saved.path) || "";
+        hideSaveModal();
+        pendingSave = null;
+        document.getElementById("saveModalDesc").textContent = "已保存到 " + path;
+      });
+    };
+    document.getElementById("saveCancel").onclick = function () {
+      // 稍后：草稿保留在 data/recordings，不删除
+      hideSaveModal();
+    };
+    document.getElementById("saveDiscard").onclick = function () {
+      if (!pendingSave || !pendingSave.id) {
+        hideSaveModal();
+        return;
+      }
+      var id = pendingSave.id;
+      post("/api/record/discard", { id: id }).then(function () {
+        pendingSave = null;
+        hideSaveModal();
+      });
+    };
+    document.getElementById("recStart").onclick = function () { post("/api/record/start"); };
+    document.getElementById("recStop").onclick = function () {
+      post("/api/record/stop").then(function (r) {
+        if (!r.ok || !r.pending_save || !r.pending_save.id) return;
+        showSaveModal(r.pending_save);
+      });
+    };
+    document.getElementById("recCancel").onclick = function () { post("/api/record/cancel"); };
+    document.getElementById("permCheck").onclick = function () { post("/api/perm-check"); };
+    document.getElementById("clearErr").onclick = function () { post("/api/clear-errors"); };
+    document.getElementById("copyLogs").onclick = function () {
+      const box = document.getElementById("logs");
+      const text = box.textContent || "";
+      const btn = document.getElementById("copyLogs");
+      function ok() {
+        btn.textContent = "已复制";
+        setTimeout(function () { btn.textContent = "复制全部"; }, 1200);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(ok).catch(function () { fallbackCopy(text, ok); });
+      } else {
+        fallbackCopy(text, ok);
+      }
+    };
+    function fallbackCopy(text, ok) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); ok(); } catch (e) {}
+      document.body.removeChild(ta);
+    }
+
+    document.getElementById("shotWrap").onclick = function () {
+      const img = document.getElementById("shotImg");
+      if (img && img.src) openShotPreview(img.src, "当前校验截图");
+    };
+    document.getElementById("shotLightbox").onclick = function (e) {
+      if (e.target && e.target.id === "shotLightboxImg") return;
+      closeShotPreview();
+    };
+    document.getElementById("logs").onclick = function (e) {
+      const t = e.target;
+      if (!t || !t.classList || !t.classList.contains("shot-link")) return;
+      openShotPreview(t.getAttribute("data-src"), t.getAttribute("data-cap") || "");
+    };
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closeShotPreview();
+    });
+
+    function openDelModal(item) {
+      pendingDelete = item || null;
+      var name = (item && item.name) || "";
+      var tip = "确定删除手点脚本「" + name + "」？配置和录制数据都会清掉，不可恢复。";
+      if (!uiIdle) tip += "（建议先终止任务再删）";
+      document.getElementById("delModalDesc").textContent = tip;
+      document.getElementById("delModal").classList.add("show");
+    }
+    function hideDelModal() {
+      pendingDelete = null;
+      document.getElementById("delModal").classList.remove("show");
+    }
+    document.getElementById("delCancel").onclick = function () { hideDelModal(); };
+    document.getElementById("delConfirm").onclick = function () {
+      if (!pendingDelete || !pendingDelete.id) {
+        hideDelModal();
+        return;
+      }
+      var id = pendingDelete.id;
+      var name = pendingDelete.name || id;
+      post("/api/script/delete", { id: id }).then(function (r) {
+        hideDelModal();
+        lastTreeKey = "";
+        if (!r.ok) {
+          document.getElementById("errors").textContent = "删除失败：" + (r.error || "未知");
+          return;
+        }
+        tick();
+      }).catch(function () {
+        hideDelModal();
+        document.getElementById("errors").textContent = "删除请求失败，请重启脚本合集后再试";
+      });
+    };
+    document.getElementById("delModal").onclick = function (e) {
+      if (e.target && e.target.id === "delModal") hideDelModal();
+    };
+
+    tick();
+    setInterval(tick, 400);
+  </script>
+</body>
+</html>

@@ -1,0 +1,63 @@
+{
+  "id": "yanyun_login",
+  "group": "yanyun",
+  "name": "登录游戏",
+  "order": 2,
+  "description": "搜索打开燕云，识图点关公告图标，再点继续游戏（不再全屏遍历）。",
+  "search": "燕云十六声",
+  "keywords": ["燕云十六声", "燕云十六", "燕云"],
+  "icon": "icons/yanyun.png",
+  "keep_alive": true,
+  "reconnect": false,
+  "watch_only": true,
+  "lost_confirm": 2,
+  "steps": [
+    {
+      "type": "wait_screen",
+      "keywords": ["更新公告", "继续游戏", "选择角色", "白露沾衣", "抵制不良游戏", "公告"],
+      "landscape": false,
+      "timeout": 18,
+      "interval": 1.0,
+      "required": false
+    },
+    {
+      "type": "close_popups",
+      "name": "关闭公告",
+      "timeout": 25,
+      "interval": 1.0,
+      "required": false,
+      "icon_first": true,
+      "when": ["更新公告", "版本更新", "玩法内容", "白露沾衣", "不删档", "游侠请", "十六巷", "在线修复", "芳草意", "公告"],
+      "stop_when": ["继续游戏", "选择角色"]
+    },
+    {
+      "type": "read_account",
+      "anchor": "继续游戏",
+      "timeout": 10,
+      "required": false
+    },
+    {
+      "type": "ocr_flow",
+      "name": "继续游戏",
+      "timeout": 20,
+      "interval": 1.0,
+      "required": false,
+      "taps": [
+        {
+          "keywords": ["继续游戏"],
+          "max": 4,
+          "wait": 1.0,
+          "allow_fallback": true
+        },
+        {
+          "when": ["选择角色", "适龄"],
+          "point": [0.50, 0.78],
+          "continue": true,
+          "max": 3,
+          "wait": 1.0
+        }
+      ],
+      "stop_when": ["设置", "进入江湖"]
+    }
+  ]
+}
