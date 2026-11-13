@@ -14,6 +14,7 @@ import sys
 import time
 
 import coords as coordlib
+from storage import atomic_write_json
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(ROOT, "logs")
@@ -52,6 +53,9 @@ BACK_ICON_PORT = os.path.join(ROOT, "icons", "back_port.png")
 BACK_ICON_PORT_CCW = os.path.join(ROOT, "icons", "back_port_ccw.png")
 BACK_ICON_LAND_1X2 = os.path.join(ROOT, "icons", "back_land_1x2.png")
 BACK_ICON_LAND_0X8 = os.path.join(ROOT, "icons", "back_land_0x8.png")
+CONTINUE_ICON_PORT = os.path.join(ROOT, "icons", "continue_game_port.png")
+CONTINUE_ICON_LAND = os.path.join(ROOT, "icons", "continue_game_land.png")
+CONTINUE_ICON_LAND_ALT = os.path.join(ROOT, "icons", "continue_game_land_alt.png")
 POPUP_CLOSE_ICON = os.path.join(ROOT, "icons", "popup_close.png")
 POPUP_CLOSE_ALT = os.path.join(ROOT, "icons", "popup_close_alt.png")
 ANNOUNCE_CLOSE = os.path.join(ROOT, "icons", "announce_close.png")
@@ -201,8 +205,7 @@ def load_errors():
 
 def save_errors(data):
     ensure_dirs()
-    with open(ERROR_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(ERROR_FILE, data)
 
 
 def record_error(message, detail=""):
@@ -258,6 +261,42 @@ def run_cmd(args, timeout=20):
         return 1, "", "timeout"
     except Exception as e:
         return 1, "", str(e)
+
+
+def _hid_idle_seconds_from_text(text):
+    match = re.search(r'"HIDIdleTime"\s*=\s*(\d+)', text or "")
+    if not match:
+        return None
+    return int(match.group(1)) / 1000000000.0
+
+
+def input_idle_seconds():
+    """Return seconds since the last keyboard/mouse input, when available."""
+    code, out, _err = run_cmd(["ioreg", "-c", "IOHIDSystem", "-d", "1"], timeout=2)
+    if code != 0:
+        return None
+    return _hid_idle_seconds_from_text(out)
+
+
+def wait_for_user_idle(min_idle=None, timeout=None):
+    """Wait briefly before a global HID event so normal mouse use wins."""
+    cfg = click_defaults()
+    if not cfg["respect_user_input"]:
+        return True
+    min_idle = float(cfg["min_idle"] if min_idle is None else min_idle)
+    timeout = float(cfg["idle_wait"] if timeout is None else timeout)
+    end = time.time() + max(0.0, timeout)
+    warned = False
+    while True:
+        idle = input_idle_seconds()
+        if idle is None or idle >= min_idle:
+            return True
+        if not warned:
+            log("INFO", "检测到你正在使用鼠标，自动点击先等空闲")
+            warned = True
+        if should_stop() or time.time() >= end:
+            return False
+        time.sleep(min(0.2, max(0.05, min_idle - idle)))
 
 
 def note_ax_denied(text):
@@ -958,7 +997,9 @@ def note_capture_fail(reason=""):
         if now - _last_cap_warn > 3:
             _last_cap_warn = now
             log("ERROR", "屏幕录制未授权（%s）→ 已停止一切截图 %.0f 小时。"
-                "请：系统设置 → 隐私与安全性 → 屏幕录制 → 勾选「脚本合集」→ 再点「重启界面」。"
+                "请：系统设置 → 隐私与安全性 → 屏幕与系统音频录制 → 打开当前启动程序"
+                "（网页启动通常是「终端」），"
+                "若系统提示则选择退出并重新打开，再点开始。"
                 % ((reason or "TCC").strip()[:80], TCC_DENY_SEC / 3600.0))
         return
     cool = 90 if _capture_fail_streak >= 2 else 30
@@ -982,6 +1023,44 @@ def clear_screen_tcc_deny():
     _screen_tcc_denied = False
     _capture_deny_until = 0
     _capture_fail_streak = 0
+
+
+def screen_capture_authorized(request=False):
+    """Ask macOS about Screen Recording without touching the mirrored phone."""
+    if not ALLOW_SCREEN_CAPTURE:
+        return True
+    try:
+        import ctypes
+        core_graphics = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+        )
+        preflight = core_graphics.CGPreflightScreenCaptureAccess
+        preflight.argtypes = []
+        preflight.restype = ctypes.c_bool
+        if bool(preflight()):
+            clear_screen_tcc_deny()
+            return True
+        if request:
+            ask = core_graphics.CGRequestScreenCaptureAccess
+            ask.argtypes = []
+            ask.restype = ctypes.c_bool
+            if bool(ask()):
+                clear_screen_tcc_deny()
+                return True
+        return False
+    except Exception as e:
+        log("WARN", "无法预检屏幕录制权限：%s" % e)
+        # Older macOS versions may not expose the preflight symbols. Preserve
+        # the existing screenshot-based behavior there.
+        return True
+
+
+def ensure_screen_capture_access(request=False):
+    """Fail before mirror restart/clicks when Screen Recording is unavailable."""
+    if screen_capture_authorized(request=request):
+        return True
+    note_capture_fail("not authorized (preflight)")
+    return False
 
 
 def screenshot_fresh(max_age=None):
@@ -1081,6 +1160,44 @@ def in_window_safe(fx, fy):
     return 0.02 <= float(fx) <= 0.98 and 0.06 <= float(fy) <= 0.98
 
 
+def pid_click_screen(x, y, tag=""):
+    """Click only inside the mirroring process; never emit a global HID event."""
+    if not ensure_click_bin():
+        return False
+    pid = get_mirror_pid()
+    if not pid:
+        return False
+    log("INFO", "镜像内点击 screen=%.1f,%.1f%s" % (
+        float(x), float(y), (" " + tag) if tag else "",
+    ))
+    code, out, err = run_cmd([CLICK_BIN, str(pid), str(x), str(y)], timeout=8)
+    if code != 0:
+        log("WARN", "镜像内点击失败: %s" % (err or out))
+        return False
+    return True
+
+
+def game_click_screen(x, y, tag=""):
+    """Click strict in-game UI, restoring the cursor immediately afterwards."""
+    if not ensure_click_bin():
+        return False
+    pid = get_mirror_pid()
+    if not pid:
+        return False
+    if not wait_for_user_idle():
+        log("INFO", "鼠标仍在使用，游戏点击降级为镜像进程内点击")
+        return pid_click_screen(x, y, tag=tag)
+    ensure_mirror_front(force=True)
+    log("INFO", "游戏点击(立即还原光标) screen=%.1f,%.1f%s" % (
+        float(x), float(y), (" " + tag) if tag else "",
+    ))
+    code, out, err = run_cmd([CLICK_BIN, "--hid-restore", str(x), str(y)], timeout=8)
+    if code != 0:
+        log("WARN", "游戏点击失败: %s" % (err or out))
+        return False
+    return True
+
+
 def silent_click_screen(x, y, tag="", force_hid=False):
     """点击镜像。
 
@@ -1116,21 +1233,25 @@ def silent_click_screen(x, y, tag="", force_hid=False):
         )
     use_hid = force_hid or mode == "hid"
     if use_hid:
-        ensure_mirror_front(force=True)
-        time.sleep(0.06)
-        # nowarp：不挪光标，比 restore 更稳，也不易点到脚本合集
-        log("INFO", "脚本点击(HID) screen=%.1f,%.1f%s" % (float(x), float(y), (" " + tag) if tag else ""))
-        code, out, err = run_cmd([CLICK_BIN, "--hid-nowarp", str(x), str(y)], timeout=8)
-        if code != 0:
-            code, out, err = run_cmd([CLICK_BIN, "--hid-restore", str(x), str(y)], timeout=8)
-        if code != 0:
+        if wait_for_user_idle():
+            ensure_mirror_front(force=True)
+            time.sleep(0.06)
+            # nowarp：不挪光标，比 restore 更稳，也不易点到脚本合集
+            log("INFO", "脚本点击(HID) screen=%.1f,%.1f%s" % (float(x), float(y), (" " + tag) if tag else ""))
+            code, out, err = run_cmd([CLICK_BIN, "--hid-nowarp", str(x), str(y)], timeout=8)
+            if code != 0:
+                code, out, err = run_cmd([CLICK_BIN, "--hid-restore", str(x), str(y)], timeout=8)
+            if code != 0:
+                code, out, err = run_cmd([CLICK_BIN, str(pid), str(x), str(y)], timeout=8)
+        else:
+            log("INFO", "鼠标仍在使用，降级为镜像进程内点击")
             code, out, err = run_cmd([CLICK_BIN, str(pid), str(x), str(y)], timeout=8)
     else:
         # soft / pid：只注入镜像进程
         log("INFO", "脚本点击(pid) screen=%.1f,%.1f%s" % (float(x), float(y), (" " + tag) if tag else ""))
         code, out, err = run_cmd([CLICK_BIN, str(pid), str(x), str(y)], timeout=8)
         # 游戏内 pid 常无效：自动补一枪 HID（仅当已在游戏阶段）
-        if code == 0 and in_game_phase():
+        if code == 0 and in_game_phase() and wait_for_user_idle():
             ensure_mirror_front(force=True)
             run_cmd([CLICK_BIN, "--hid-nowarp", str(x), str(y)], timeout=8)
     if code != 0:
@@ -1209,6 +1330,12 @@ IN_GAME_WORDS = [
     # 开屏健康提示 / 光敏提示（长文，勿当成进错 App）
     "光敏", "癫痫", "详细阅读", "抵制不良游戏", "适度游戏",
     "未成年人", "健康上网", "警告",
+    # 登录后端仍在线时，弹窗可能比角色页更早出现。
+    "账号已在线", "是否继续登录",
+]
+GAMEPLAY_HUD_WORDS = [
+    "返回任务点", "前往目标", "到达", "位移", "轻击", "闪避", "奇术",
+    "伤害", "灼烧", "探索", "获得成就",
 ]
 
 
@@ -1311,6 +1438,9 @@ def click_defaults():
         "mode": mode,
         "auto_tries": int(cfg.get("auto_tries") if cfg.get("auto_tries") is not None else default_tries),
         "manual_timeout": float(cfg.get("manual_timeout") if cfg.get("manual_timeout") is not None else 90),
+        "respect_user_input": bool(cfg.get("respect_user_input", True)),
+        "min_idle": float(cfg.get("min_idle") if cfg.get("min_idle") is not None else 0.8),
+        "idle_wait": float(cfg.get("idle_wait") if cfg.get("idle_wait") is not None else 6.0),
     }
 
 
@@ -1613,8 +1743,7 @@ def write_moyu_store(store):
                 row[orient] = slot
         items.append(row)
     data = {"version": 3, "items": items}
-    with open(MOYU_POINTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(MOYU_POINTS_FILE, data)
     return data
 
 
@@ -2029,11 +2158,14 @@ def raw_click_screen(x, y, tag=""):
     pid = get_mirror_pid()
     if not pid:
         return False
-    ensure_mirror_front(force=True)
-    time.sleep(0.06)
     log("INFO", "遍历点击 screen=%.1f,%.1f%s" % (float(x), float(y), (" " + tag) if tag else ""))
-    code, out, err = run_cmd([CLICK_BIN, "--hid-nowarp", str(x), str(y)], timeout=8)
-    if code != 0:
+    if wait_for_user_idle():
+        ensure_mirror_front(force=True)
+        time.sleep(0.06)
+        code, out, err = run_cmd([CLICK_BIN, "--hid-nowarp", str(x), str(y)], timeout=8)
+        if code != 0:
+            code, out, err = run_cmd([CLICK_BIN, str(pid), str(x), str(y)], timeout=8)
+    else:
         code, out, err = run_cmd([CLICK_BIN, str(pid), str(x), str(y)], timeout=8)
     if code != 0:
         log("WARN", "遍历点击失败: %s" % (err or out))
@@ -2476,9 +2608,7 @@ def save_catalog(catalog):
                 "id": str(g["id"]).strip(),
                 "name": str(g.get("name") or g["id"]).strip(),
             })
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(clean, f, ensure_ascii=False, indent=2)
-            f.write("\n")
+        atomic_write_json(path, clean)
         return True, ""
     except Exception as e:
         return False, "保存分组失败：%s" % e
@@ -2732,6 +2862,8 @@ def delete_script(script_id):
 
 # 脚本步骤可编辑类型（界面新增用；引擎里还有更多，可用 JSON 高级编辑）
 STEP_TYPE_CATALOG = [
+    {"type": "yanyun_flow", "label": "识别状态并登录", "hint": "从当前页面继续，确认进入游戏"},
+    {"type": "moyu_flow", "label": "识别状态并匹配", "hint": "从当前页面继续觉障林流程"},
     {"type": "find_icon_click", "label": "找图标点击", "hint": "模板/手校点图标"},
     {"type": "tap_text", "label": "点文字/图标", "hint": "OCR 或模板，可绑手校"},
     {"type": "close_popups", "label": "关公告", "hint": "登录用，关更新公告"},
@@ -2753,7 +2885,14 @@ STEP_TYPE_CATALOG = [
 def _default_step(kind):
     kind = (kind or "").strip() or "tap_text"
     base = {"type": kind, "name": "", "required": True}
-    if kind == "find_icon_click":
+    if kind in ("yanyun_flow", "moyu_flow"):
+        base.update({
+            "name": "识别状态并登录" if kind == "yanyun_flow" else "识别进度并完成觉障林",
+            "goal": "playing" if kind == "yanyun_flow" else "matching",
+            "timeout": 180, "interval": 0.6, "stage_confirmations": 2,
+            "transition_timeout": 8, "max_recoveries": 3,
+        })
+    elif kind == "find_icon_click":
         base.update({
             "name": "点图标", "calib_key": "", "templates": [],
             "min_score": 0.60, "timeout": 16, "interval": 1.0, "wait": 1.0, "clicks": 1,
@@ -2839,9 +2978,7 @@ def save_config(cfg):
         path = os.path.join(folder, "%s.json" % data["id"])
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.write("\n")
+        atomic_write_json(path, data)
     except Exception as e:
         return False, "保存失败：%s" % e
     log("INFO", "已保存脚本：%s → %s" % (data.get("name") or data["id"], path))
@@ -3417,7 +3554,7 @@ def point_in_window(fx, fy):
     return outer_to_screen(fx, fy)
 
 
-def ensure_mirror_ready():
+def ensure_mirror_ready(wait_connected=True):
     if not process_running():
         open_mirror()
         if not wait_window():
@@ -3428,7 +3565,7 @@ def ensure_mirror_ready():
         if not wait_window():
             log("WARN", "镜像窗口还没出来")
             return False
-    if not wait_until_connected(20):
+    if wait_connected and not wait_until_connected(20):
         return False
     return True
 
@@ -3464,9 +3601,8 @@ def joined_ocr(items):
     return "".join((i.get("text") or "") for i in (items or [])).replace(" ", "")
 
 
-def phone_screen_kind():
-    land = is_landscape()
-    items = ocr_items()
+def classify_phone_screen(items, land=False, relaxed_home=False):
+    """Classify OCR from the mirrored phone; relaxed mode is only for post-Home checks."""
     blob = joined_ocr(items)
     names = [i.get("text") or "" for i in items]
     text = " ".join(names)
@@ -3479,20 +3615,32 @@ def phone_screen_kind():
         return "search"
     if contains_any(text, IN_APP_WORDS):
         return "app"
-    if land:
-        return "app"
     if not names:
-        return "home"
+        return "unknown"
     home_hits = 0
     for word in HOME_SCREEN_WORDS:
         if word.replace(" ", "") in blob:
             home_hits += 1
     if home_hits >= 1:
         return "home"
+    # The mirrored window can briefly keep its old landscape geometry after Home.
+    # Only use orientation after checking explicit desktop app/widget labels.
+    if land:
+        return "app"
     short = [n for n in names if 1 <= len((n or "").replace(" ", "")) <= 6]
     if len(short) >= 6:
         return "home"
+    if relaxed_home:
+        long_lines = [n for n in names if len((n or "").replace(" ", "")) >= 8]
+        if len(short) >= 2 and not long_lines:
+            return "home"
     return "app"
+
+
+def phone_screen_kind(relaxed_home=False):
+    return classify_phone_screen(
+        ocr_items(), land=is_landscape(), relaxed_home=bool(relaxed_home),
+    )
 
 
 def swipe_up_home():
@@ -3515,46 +3663,56 @@ def swipe_down_search():
 
 def go_home(step=None):
     step = step or {}
-    log("INFO", "回到主屏幕")
+    log("INFO", "触发 iPhone 镜像主屏幕控制")
     hotkey = step.get("hotkey") or "cmd-1"
-    for i in range(4):
+    try:
+        attempts = max(1, min(3, int(step.get("attempts") or 2)))
+    except (TypeError, ValueError):
+        attempts = 2
+    for i in range(attempts):
         if should_stop():
             log("WARN", "已终止，中断回主屏幕")
             return False
-        send_hotkey(hotkey, focus=True)
-        time.sleep(0.4)
-        swipe_up_home()
-        time.sleep(0.4)
-        send_hotkey(hotkey, focus=True)
-        time.sleep(0.35)
-        if step.get("click_bar", True):
-            pt = point_in_window(0.5, 0.96)
-            if pt:
-                # 必须 postToPid：HID 点屏幕底部容易点到「脚本合集」的终止按钮
-                ensure_mirror_front(force=True)
-                silent_click_at(pt[0], pt[1])
-        time.sleep(0.8)
-        kind = phone_screen_kind()
-        log("INFO", "回主屏幕后画面：%s" % kind)
-        if kind == "search":
-            send_hotkey(hotkey, focus=True)
-            time.sleep(0.5)
-            kind = phone_screen_kind()
+        if not send_hotkey(hotkey, focus=True):
+            return False
+        time.sleep(0.25)
+        kind = phone_screen_kind(relaxed_home=True)
+        log("INFO", "主屏幕控制后画面：%s" % kind)
         if kind == "home":
+            set_phase("home")
             save_shot("at_home")
             return True
-        log("INFO", "还在别的 App 里，再回一次主屏幕")
+        if i + 1 < attempts:
+            log("INFO", "还未确认桌面，再触发一次主屏幕控制")
+    if step.get("gesture_fallback"):
+        log("WARN", "主屏幕控制未生效，使用一次上滑兜底")
+        if swipe_up_home():
+            time.sleep(0.35)
+            if phone_screen_kind(relaxed_home=True) == "home":
+                save_shot("at_home")
+                return True
     save_shot("home_fail")
     log("WARN", "没确认回到主屏幕")
-    return True
+    return False
+
+
+def prepare_task_home():
+    """Every task starts from a verified phone home screen."""
+    if not ensure_mirror_ready():
+        return False
+    if not wait_mirror_ready(35):
+        return False
+    if not unlock_if_needed():
+        return False
+    return go_home({"hotkey": "cmd-1", "attempts": 2, "gesture_fallback": False})
 
 
 def open_search(step=None):
     log("INFO", "进入搜索页")
     bring_front()
-    time.sleep(0.25)
+    time.sleep(0.12)
     send_hotkey("cmd-3", focus=True)
-    time.sleep(1.3)
+    time.sleep(0.65)
     return True
 
 
@@ -3736,19 +3894,40 @@ def type_search_and_open(config):
     log("INFO", "搜索并打开：%s" % name)
     if not send_text(name, focus=True):
         return False
-    time.sleep(1.2)
+    time.sleep(0.65)
     # 有截屏才 OCR 点结果；否则直接回车打开第一个
     if ALLOW_SCREEN_CAPTURE and (not screen_tcc_denied()) and (not capture_denied()):
         hit = match_app_item(ocr_items(), keywords or [name])
         if hit:
             log("INFO", "搜索结果里找到 %s，点开" % hit.get("text"))
             tap_ocr_item(hit, float(config.get("tap_above") or 0.02))
-            time.sleep(1.6)
-            return True
+            time.sleep(0.9)
+            return wake_game_after_open(config)
     log("INFO", "搜索后回车打开（不依赖识图）")
     send_hotkey("return")
-    time.sleep(1.6)
-    return True
+    time.sleep(0.9)
+    return wake_game_after_open(config)
+
+
+def wake_game_after_open(config):
+    """After launching a game, dismiss any idle splash without global HID."""
+    if not config.get("wake_after_open"):
+        return True
+    try:
+        clicks = max(1, min(5, int(config.get("wake_clicks", 3))))
+        wait_after = max(0.0, float(config.get("wake_wait", 5.0)))
+    except (TypeError, ValueError):
+        clicks, wait_after = 3, 5.0
+    log("INFO", "进入游戏后轻点中央 %s 次，再等待 %.1f 秒" % (clicks, wait_after))
+    for index in range(clicks):
+        if should_stop():
+            return False
+        point = point_in_window(0.5, 0.5)
+        if not point or not pid_click_screen(point[0], point[1], tag="(wake %s/%s)" % (index + 1, clicks)):
+            return False
+        if index + 1 < clicks:
+            time.sleep(0.35)
+    return sleep_wait(wait_after)
 
 
 def is_landscape():
@@ -3797,6 +3976,13 @@ def in_game_now(config=None):
     return hit, items
 
 
+def looks_like_gameplay_hud(items):
+    """用至少两个游戏 HUD 特征确认已经进入可操作场景。"""
+    blob = joined_ocr(items)
+    hud_hits = sum(1 for word in GAMEPLAY_HUD_WORDS if word in blob)
+    return hud_hits >= 2
+
+
 def looks_like_game(items, config=None):
     """比 in_game_now 更宽：竖屏旋转后 OCR 乱也能抓住游戏痕迹。"""
     words = list(IN_GAME_WORDS)
@@ -3805,6 +3991,10 @@ def looks_like_game(items, config=None):
             if k and k not in words:
                 words.append(k)
     if match_app_item(items, words):
+        return True
+    # 战斗/探索 HUD 经常没有游戏名；至少两个控件/任务词同时出现才采信，
+    # 避免手机桌面上单个“设置”或普通文本造成误判。
+    if looks_like_gameplay_hud(items):
         return True
     blob = joined_ocr(items)
     soft = ["燕云", "公告", "继续", "角色", "江湖", "适龄", "实名", "防沉迷", "网易"]
@@ -3893,7 +4083,16 @@ def open_game_once(config, options=None):
     options = options or {}
     # 横竖屏都兼容：进了游戏就成功，不再为竖屏强杀镜像
     force_land = bool(config.get("require_landscape") or options.get("require_landscape"))
-    log("INFO", "进入游戏（横竖屏兼容%s）" % ("；仅当显式要求才强杀横屏" if force_land else ""))
+    fresh_launch = bool(config.get("fresh_launch") or options.get("fresh_launch"))
+    background_killed = False
+    mode_notes = []
+    if force_land:
+        mode_notes.append("仅当显式要求才强杀横屏")
+    if fresh_launch:
+        mode_notes.append("登录前确保游戏冷启动")
+    log("INFO", "进入游戏（横竖屏兼容%s）" % (
+        ("；" + "；".join(mode_notes)) if mode_notes else ""
+    ))
     log_window_geom("open_game")
     if not ensure_mirror_ready():
         return False
@@ -3903,25 +4102,43 @@ def open_game_once(config, options=None):
     if not unlock_if_needed():
         return False
     time.sleep(0.8)
+    if fresh_launch and config.get("kill_game_background_before_open"):
+        log("INFO", "登录脚本固定先关闭手机里的游戏后台")
+        if not kill_game_background({"required": True, "cards": 1}):
+            return False
+        background_killed = True
+        time.sleep(0.6)
     in_game, items = in_game_now(config)
     if in_game or looks_like_game(items, config):
         save_shot("already_in_game")
         orient = "横屏" if is_landscape() else "竖屏"
-        log("INFO", "已经在游戏里（%s），直接继续" % orient)
-        if force_land and not is_landscape():
-            return recover_landscape(config)
-        set_phase("game_playing")
-        return True
+        if fresh_launch:
+            log("INFO", "已经在游戏里（%s），登录脚本先杀游戏后台再重新打开" % orient)
+            if not kill_game_background({"required": True, "cards": 1}):
+                return False
+            background_killed = True
+        else:
+            log("INFO", "已经在游戏里（%s），直接继续" % orient)
+            if force_land and not is_landscape():
+                return recover_landscape(config)
+            set_phase("game_playing")
+            return True
     wrong = is_wrong_app(items)
     if wrong == "connecting":
         if not wait_until_connected(20):
             return False
         in_game, items = in_game_now(config)
         if in_game or looks_like_game(items, config):
-            if force_land and not is_landscape():
-                return recover_landscape(config)
-            set_phase("game_playing")
-            return True
+            if fresh_launch:
+                log("INFO", "重连后仍在游戏里，登录脚本先杀后台")
+                if not kill_game_background({"required": True, "cards": 1}):
+                    return False
+                background_killed = True
+            else:
+                if force_land and not is_landscape():
+                    return recover_landscape(config)
+                set_phase("game_playing")
+                return True
     if wrong and wrong != "connecting":
         note_wrong_app(wrong)
         log("INFO", "当前是其他 App（%s），先回主屏幕" % wrong)
@@ -3934,9 +4151,28 @@ def open_game_once(config, options=None):
         return False
     time.sleep(1.0)
     tries = 0
-    while tries < 2:
+    max_tries = 3 if fresh_launch else 2
+    while tries < max_tries:
         in_game, items = in_game_now(config)
-        if in_game or looks_like_game(items, config):
+        like = in_game or looks_like_game(items, config)
+        if like and fresh_launch and looks_like_gameplay_hud(items):
+            if background_killed:
+                log("WARN", "杀后台后仍直接恢复到游戏内，停止登录流程，避免误点")
+                save_shot("fresh_launch_still_in_game")
+                return False
+            log("INFO", "首次打开直接恢复到游戏内，补做杀后台后重新打开")
+            save_shot("fresh_launch_resumed_game")
+            if not kill_game_background({"required": True, "cards": 1}):
+                return False
+            background_killed = True
+            set_phase("spotlight_search")
+            open_search()
+            if not type_search_and_open(config):
+                return False
+            time.sleep(1.0)
+            tries += 1
+            continue
+        if like:
             break
         wrong = is_wrong_app(items)
         if wrong == "connecting":
@@ -3962,6 +4198,10 @@ def open_game_once(config, options=None):
         tries += 1
     in_game, items = in_game_now(config)
     like = in_game or looks_like_game(items, config)
+    if like and fresh_launch and looks_like_gameplay_hud(items):
+        log("WARN", "冷启动校验仍是游戏内画面，停止登录流程，避免误点")
+        save_shot("fresh_launch_validation_failed")
+        return False
     if not like:
         # 截屏关了/权限冷却时 OCR 永远空，不能因此卡死整条脚本
         if (not ALLOW_SCREEN_CAPTURE) or screen_tcc_denied() or capture_denied():
@@ -4264,8 +4504,8 @@ def append_hand_click(fx=None, fy=None, cg=None, verify=False, outer=None, conte
     }
     step["shot_file"] = shot_name if got_shot else ""
     rec["steps"].append(step)
-    with open(os.path.join(rec["folder"], "steps.json"), "w", encoding="utf-8") as f:
-        json.dump({"steps": rec["steps"]}, f, ensure_ascii=False, indent=2)
+    steps_path = os.path.join(rec["folder"], "steps.json")
+    atomic_write_json(steps_path, {"steps": rec["steps"]})
     log_click("record", fx2, fy2, sx, sy, spx, spy)
     log("INFO", "录制第 %s 步 outer=%.4f,%.4f（%s，锚点已存）" % (
         idx, fx2, fy2, step["orient"],
@@ -4274,8 +4514,7 @@ def append_hand_click(fx=None, fy=None, cg=None, verify=False, outer=None, conte
         time.sleep(0.35)
         ok = tap_point(fx2, fy2, step=step, source="record_verify")
         step["verified"] = bool(ok)
-        with open(os.path.join(rec["folder"], "steps.json"), "w", encoding="utf-8") as f:
-            json.dump({"steps": rec["steps"]}, f, ensure_ascii=False, indent=2)
+        atomic_write_json(steps_path, {"steps": rec["steps"]})
     return step, ""
 
 
@@ -4293,8 +4532,10 @@ def finish_hand_recording():
         except Exception:
             pass
         return None, "一步都没点，已取消录制"
-    with open(os.path.join(rec["folder"], "steps.json"), "w", encoding="utf-8") as f:
-        json.dump({"steps": steps, "name": rec["name"]}, f, ensure_ascii=False, indent=2)
+    atomic_write_json(
+        os.path.join(rec["folder"], "steps.json"),
+        {"steps": steps, "name": rec["name"]},
+    )
     draft = {
         "id": rec["id"],
         "name": rec["name"],
@@ -4302,8 +4543,7 @@ def finish_hand_recording():
         "folder": rec["folder"],
         "pending": True,
     }
-    with open(os.path.join(rec["folder"], "draft.json"), "w", encoding="utf-8") as f:
-        json.dump(draft, f, ensure_ascii=False, indent=2)
+    atomic_write_json(os.path.join(rec["folder"], "draft.json"), draft)
     _active_recording = None
     log("INFO", "录制草稿已就绪：%s，共 %s 步，请选择保存到燕云/星穹铁道" % (rec["name"], len(steps)))
     return draft, ""
@@ -4351,10 +4591,10 @@ def save_hand_recording(recording_id, name=None, group="yanyun"):
     out_dir = os.path.join(CONFIG_DIR, group)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, rid + ".json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-    with open(os.path.join(folder, "steps.json"), "w", encoding="utf-8") as f:
-        json.dump({"steps": steps, "name": display}, f, ensure_ascii=False, indent=2)
+    atomic_write_json(out_path, cfg)
+    atomic_write_json(
+        os.path.join(folder, "steps.json"), {"steps": steps, "name": display}
+    )
     draft_path = os.path.join(folder, "draft.json")
     if os.path.isfile(draft_path):
         try:
@@ -4622,6 +4862,24 @@ def find_icon_click(step):
             if not sleep_wait(wait_after):
                 return False
             return True
+    fallback_point = (
+        step.get("point_port") if is_portrait_window()
+        else step.get("point_land")
+    )
+    fallback_point = fallback_point or step.get("point")
+    if step.get("fallback_immediate") and fallback_point and len(fallback_point) >= 2:
+        fx, fy = float(fallback_point[0]), float(fallback_point[1])
+        log("INFO", "「%s」直接用%s兜底坐标 %.3f,%.3f" % (
+            name, "竖屏" if is_portrait_window() else "横屏", fx, fy,
+        ))
+        set_overlay_unlocked_for_clicks()
+        save_shot("fallback_" + name, click=(fx, fy))
+        for i in range(max(1, clicks)):
+            if not tap_point(fx, fy, source="icon"):
+                return False
+            if i + 1 < clicks:
+                time.sleep(0.35)
+        return sleep_wait(wait_after)
     paths = []
     for p in (step.get("templates") or []):
         if not p:
@@ -4817,6 +5075,19 @@ def tap_text(step):
     log("INFO", "寻找并点击「%s」×%s（手校→图标→文字）" % (name, clicks))
     set_overlay_unlocked_for_clicks()
 
+    def click_target(fx, fy, calibrated=None):
+        if step.get("force_restore"):
+            point = point_in_window(fx, fy)
+            if not point:
+                return False
+            return game_click_screen(point[0], point[1], tag="(%s)" % name)
+        if step.get("pid_only"):
+            point = point_in_window(fx, fy)
+            if not point:
+                return False
+            return pid_click_screen(point[0], point[1], tag="(%s)" % name)
+        return tap_point(fx, fy, step=calibrated, source="tap_text")
+
     # 手校点位优先
     if calib_key:
         resolved = resolve_moyu_tap(calib_key)
@@ -4825,7 +5096,7 @@ def tap_text(step):
             log("INFO", "「%s」用手校点位 %.3f,%.3f" % (name, fx, fy))
             save_shot("calib_" + name, click=(fx, fy))
             for i in range(max(1, clicks)):
-                tap_point(fx, fy, step=step_hit, source="tap_text")
+                click_target(fx, fy, calibrated=step_hit)
                 if i + 1 < clicks:
                     time.sleep(0.45)
             if not sleep_wait(wait_after):
@@ -4881,7 +5152,7 @@ def tap_text(step):
             save_shot("tap_" + name, click=(fx, fy))
             log("INFO", "点「%s」%.3f,%.3f ×%s（%s）" % (name, fx, fy, clicks, how))
             for i in range(max(1, clicks)):
-                tap_point(fx, fy, source="tap_text")
+                click_target(fx, fy)
                 if i + 1 < clicks:
                     time.sleep(0.45)
             if not sleep_wait(wait_after):
@@ -4896,12 +5167,398 @@ def tap_text(step):
     if point and len(point) >= 2:
         log("WARN", "「%s」未识到，用兜底坐标" % name)
         for _ in range(max(1, clicks)):
-            tap_point(point[0], point[1], source="tap_text")
+            click_target(point[0], point[1])
             time.sleep(0.35)
         time.sleep(wait_after)
         return True
     log("WARN", "超时未点到「%s」" % name)
     return not step.get("required", True)
+
+
+MOYU_STAGE_ORDER = (
+    "home", "search", "launching", "splash", "start_game", "announcement",
+    "continue_game", "online_confirm", "enter_game", "hud", "tongyou",
+    "zhige", "juezhanglin", "match_ready", "matching",
+)
+MOYU_STAGE_RANK = {state: index for index, state in enumerate(MOYU_STAGE_ORDER)}
+YANYUN_PLAYING_STATES = {"hud", "tongyou", "zhige", "juezhanglin", "match_ready", "matching"}
+YANYUN_SYSTEM_STATES = {"connecting", "connection_failed", "lock", "wrong_app"}
+
+
+def moyu_transition_status(previous, current):
+    """A confirmed earlier page is a new starting point, including after reconnect."""
+    if not previous:
+        return "initial"
+    if current == "unknown":
+        return "pending"
+    if current == previous:
+        return "same"
+    before = MOYU_STAGE_RANK.get(previous)
+    after = MOYU_STAGE_RANK.get(current)
+    if before is not None and after is not None and after > before:
+        return "forward"
+    if current in MOYU_STAGE_RANK or current in YANYUN_SYSTEM_STATES:
+        return "resync"
+    return "invalid"
+
+
+def yanyun_phrase_hit(items, words):
+    """Recognize whole labels and adjacent OCR fragments, including rotated labels."""
+    hit = match_app_item(items, words)
+    if hit:
+        return hit
+    for word in words:
+        chars = []
+        for item in items or []:
+            text = (item.get("text") or "").replace(" ", "")
+            w, h = float(item.get("w") or 0), float(item.get("h") or 0)
+            if not text or text not in word or w <= 0 or h <= 0:
+                continue
+            vertical = h > w * 1.6
+            for index, char in enumerate(text):
+                chars.append({
+                    "text": char,
+                    "x": float(item.get("x") or 0) + (0 if vertical else w * index / len(text)),
+                    "y": float(item.get("y") or 0) + (h * index / len(text) if vertical else 0),
+                    "w": w if vertical else w / len(text),
+                    "h": h / len(text) if vertical else h,
+                })
+        hit = match_vertical_phrase(chars, word)
+        if hit:
+            return hit
+    return None
+
+
+def moyu_progress(items):
+    """Classify the visible page; blocking dialogs always outrank their underlay."""
+    items = items or []
+    blob = joined_ocr(items)
+    # Do not use generic words such as 密码/重试/未找到 as phone-system evidence.
+    if contains_any(blob, ["无法连接", "连接失败", "can'tconnect", "cannotconnect", "couldn'tconnect"]):
+        return "connection_failed"
+    if contains_any(blob, ["正在连接", "connecting"]):
+        return "connecting"
+    if contains_any(blob, ["滑动来解锁", "滑动解锁", "解锁iPhone", "输入iPhone密码", "enterpasscode", "slidetounlock"]):
+        return "lock"
+    if ("输入密码" in blob or "使用密码" in blob or "FaceID" in blob) and contains_any(blob, ["紧急", "emergency", "iPhone", "解锁"]):
+        return "lock"
+    if match_app_item(items, [
+        "账号已登录", "账号已在线", "帐号已登录", "帐号已在线", "是否继续登录",
+        "其他设备", "其它设备", "是否继续", "账号在别处登录",
+    ]):
+        return "online_confirm"
+    if match_app_item(items, [
+        "更新公告", "版本更新", "在线修复公告", "玩法内容", "游侠亲启",
+        "不删档活动", "白露沾衣", "公告",
+    ]):
+        return "announcement"
+    if match_app_item(items, ["光敏", "癫痫", "游戏前请详细阅读", "游戏前请仔细阅读", "仗剑长啸万里同行"]):
+        return "splash"
+    if yanyun_phrase_hit(items, ["继续游戏"]):
+        return "continue_game"
+    if yanyun_phrase_hit(items, ["进入江湖", "进入游戏", "选择角色"]):
+        return "enter_game"
+    if yanyun_phrase_hit(items, ["开始游戏"]):
+        return "start_game"
+    for state, words in (
+        ("matching", ["退出匹配", "取消匹配", "匹配中", "正在匹配"]),
+        ("match_ready", ["开始匹配"]),
+        ("juezhanglin", ["觉障林", "觉樟林"]),
+        ("zhige", ["止戈"]),
+        ("tongyou", ["同游"]),
+    ):
+        if yanyun_phrase_hit(items, words):
+            return state
+    if looks_like_gameplay_hud(items):
+        return "hud"
+    if match_app_item(items, [
+        "建议18岁", "建议16岁", "16+", "适龄提示", "抵制不良游戏",
+        "适度游戏", "健康上网", "加载中", "正在加载", "资源加载",
+    ]):
+        return "launching"
+    # A title in Spotlight results does not mean that the game is already open.
+    search = contains_any(blob, ["搜索", "Search"])
+    if search and contains_any(blob, ["取消", "Siri", "键盘", "建议"]):
+        return "search"
+    home_words = [word for word in HOME_SCREEN_WORDS if word != "设置"]
+    if match_app_item(items, home_words):
+        return "home"
+    if is_wrong_app(items):
+        return "wrong_app"
+    # Short snippets of unrecognized game text are not proof of a phone desktop.
+    return "unknown"
+
+
+def _wake_moyu_screen(clicks=1, wait_after=1.0):
+    """Dismiss a recognized idle/splash page, then observe before another action."""
+    for index in range(max(1, int(clicks))):
+        if not wait_if_paused():
+            return False
+        point = point_in_window(0.5, 0.5)
+        if not point or not silent_click_screen(
+            point[0], point[1], tag="(moyu wake)", force_hid=True,
+        ):
+            return False
+        if index + 1 < clicks and not sleep_wait(0.35):
+            return False
+    return sleep_wait(float(wait_after))
+
+
+def _yanyun_click(point, tag):
+    if not point:
+        return False
+    screen = point_in_window(point[0], point[1])
+    return bool(screen and silent_click_screen(
+        screen[0], screen[1], tag=tag, force_hid=True,
+    ))
+
+
+def _yanyun_button_hit(items, words):
+    # Avoid clicking the center of a long dialog sentence instead of its button.
+    buttons = [item for item in items if any(
+        (item.get("text") or "").replace(" ", "") == word for word in words
+    )]
+    fragments = [item for item in items if any(
+        (item.get("text") or "").replace(" ", "") in word for word in words
+    )]
+    return match_app_item_precise(buttons, words) or yanyun_phrase_hit(fragments, words)
+
+
+def _yanyun_page_action(state, items, step):
+    """Perform one action on the confirmed page, using the current OCR boxes."""
+    if state in ("home", "search"):
+        if state == "home" and not open_search():
+            return False
+        if state == "search" and not send_hotkey("cmd-a", focus=True):
+            return False
+        return type_search_and_open({
+            "search": "燕云十六声", "keywords": ["燕云十六声", "燕云十六", "燕云"],
+            "wake_after_open": False,
+        })
+    if state == "lock":
+        return unlock_if_needed()
+    if state == "splash":
+        return _wake_moyu_screen(clicks=1, wait_after=0.8)
+    if state == "announcement":
+        point = back_button_pos()
+        # An OCR close label gives another path when a saved coordinate went stale.
+        if step.get("_action_attempt", 0):
+            hit = _yanyun_button_hit(items, ["关闭", "返回", "知道了", "我知道了"])
+            icon = find_back_button(min_score=0.65)
+            if icon:
+                point = icon[:2]
+            elif hit:
+                point = ocr_hit_to_outer(hit)
+        return _yanyun_click(point, "(close announcement)")
+    if state == "continue_game":
+        account, box = username_near(items)
+        if account:
+            set_current_account(account, box)
+        hit = yanyun_phrase_hit(items, ["继续游戏"])
+        point = ocr_hit_to_outer(hit) if hit else find_continue_target(items)[:2]
+        return _yanyun_click(point, "(continue game)")
+    if state in ("online_confirm", "enter_game", "start_game"):
+        words = {
+            "online_confirm": ["继续登录", "确认登录", "继续", "确定", "确认"],
+            "enter_game": ["进入江湖", "进入游戏"],
+            "start_game": ["开始游戏"],
+        }[state]
+        hit = _yanyun_button_hit(items, words)
+        if hit:
+            point = ocr_hit_to_outer(hit)
+        elif state == "online_confirm":
+            point = [0.32, 0.84] if is_portrait_window() else [0.84, 0.68]
+        else:
+            point = continue_fallback_point()
+        return _yanyun_click(point, "(" + state + ")")
+    if state == "hud":
+        calibrated = resolve_moyu_tap("menu")
+        point = ((calibrated[0], calibrated[1]) if calibrated else (
+            step.get("menu_point_port") or [0.9265, 0.9122]
+            if is_portrait_window() else step.get("menu_point_land") or [0.19, 0.94]
+        ))
+        screen = point_in_window(point[0], point[1])
+        return bool(screen and game_click_screen(screen[0], screen[1], tag="(moyu menu)"))
+    action_labels = {
+        "tongyou": (["同游"], "tongyou"),
+        "zhige": (["止戈"], "zhige"),
+        "juezhanglin": (["觉障林", "觉樟林"], "juezhanglin"),
+        "match_ready": (["开始匹配"], "start_match"),
+    }
+    words, key = action_labels[state]
+    hit = _yanyun_button_hit(items, words)
+    if hit:
+        return _yanyun_click(ocr_hit_to_outer(hit), "(" + key + ")")
+    calibrated = resolve_moyu_tap(key)
+    if calibrated:
+        return tap_point(calibrated[0], calibrated[1], step=calibrated[2], source="yanyun_flow")
+    return False
+
+
+def run_moyu_flow(step):
+    """Resume login or matching from observations, with bounded recovery attempts."""
+    if not ensure_mirror_ready(wait_connected=False):
+        return False
+    goal = step.get("goal") or "matching"
+    if goal not in ("playing", "matching"):
+        log("WARN", "不支持的燕云流程目标：%s" % goal)
+        return False
+    timeout = max(1.0, float(step.get("timeout") or 180))
+    interval = max(0.1, float(step.get("interval") or 1.0))
+    max_same = max(1, int(step.get("max_same_actions") or 3))
+    max_recoveries = max(0, int(step.get("max_recoveries", 3)))
+    launch_wait = max(5.0, float(step.get("launch_wait") or 45.0))
+    confirmations = max(2, int(step.get("stage_confirmations") or 2))
+    matching_confirmations = max(2, int(step.get("matching_confirmations") or 2))
+    transition_timeout = max(3.0, float(step.get("transition_timeout") or 8.0))
+    end = time.monotonic() + timeout
+    observed_state, observed_hits = "", 0
+    pending_from, pending_deadline = "", 0.0
+    action_state, same_actions = "", 0
+    state_since = time.monotonic()
+    settle_until = 0.0
+    recoveries = 0
+    saved_states = set()
+    action_states = set(MOYU_STAGE_ORDER) - {"launching", "matching"}
+    action_states.add("lock")
+    log("INFO", "从当前页面继续燕云流程，目标=%s；每个状态连续确认 %s 次" % (goal, confirmations))
+
+    def recover(reason, reconnect=False):
+        nonlocal recoveries, observed_state, observed_hits, pending_from
+        nonlocal pending_deadline, action_state, same_actions, settle_until, state_since
+        if recoveries >= max_recoveries:
+            save_shot("yanyun_recovery_exhausted")
+            log("WARN", "自动恢复次数已用尽：%s" % reason)
+            return False
+        recoveries += 1
+        log("WARN", "自动恢复 %s/%s：%s" % (recoveries, max_recoveries, reason))
+        save_shot("yanyun_recover_%s" % recoveries)
+        if reconnect:
+            ok = restart_mirror()
+        else:
+            ok = go_home()
+            if not ok and not should_stop():
+                ok = restart_mirror()
+        if not ok:
+            return False
+        # Never trust an old app_phase or a prior task's home_ready flag.
+        observed_state, observed_hits = "", 0
+        pending_from, pending_deadline = "", 0.0
+        action_state, same_actions = "", 0
+        state_since = time.monotonic()
+        settle_until = state_since + transition_timeout
+        set_phase("connecting" if reconnect else "idle")
+        return True
+
+    while time.monotonic() < end:
+        if not wait_if_paused():
+            return False
+        if screen_tcc_denied() or capture_denied() or not ALLOW_SCREEN_CAPTURE:
+            log("WARN", "画面读取不可用，无法确认当前状态，停止本轮识别")
+            return False
+        if not has_window():
+            if not recover("镜像窗口丢失", reconnect=True):
+                return False
+            continue
+        items = ocr_items(accurate=True)
+        # Capture may fail during the observation. Do not recover by blind clicks.
+        if screen_tcc_denied() or capture_denied() or should_stop():
+            return False
+        state = moyu_progress(items)
+        now = time.monotonic()
+        if state == observed_state:
+            observed_hits += 1
+        else:
+            observed_state, observed_hits = state, 1
+            state_since = now
+            names = [item.get("text") for item in items if item.get("text")]
+            log("INFO", "当前页面：%s%s" % (state, "（%s）" % "、".join(names[:10]) if names else ""))
+        if state not in saved_states:
+            save_shot("moyu_state_" + state)
+            saved_states.add(state)
+        needed = matching_confirmations if state == "matching" else confirmations
+
+        if pending_from:
+            transition = moyu_transition_status(pending_from, state)
+            if transition in ("same", "pending"):
+                deadline = max(pending_deadline, settle_until) if state == "unknown" else pending_deadline
+                if now < deadline:
+                    if not sleep_wait(interval):
+                        return False
+                    continue
+                pending_from, pending_deadline = "", 0.0
+            elif observed_hits < needed:
+                if not sleep_wait(interval):
+                    return False
+                continue
+            else:
+                log("INFO", "重新同步页面：%s → %s（%s）" % (pending_from, state, transition))
+                pending_from, pending_deadline = "", 0.0
+
+        if state == "unknown":
+            if observed_hits >= confirmations and now >= max(settle_until, state_since + transition_timeout):
+                if not recover("当前页面暂时无法识别，返回桌面重新进入"):
+                    return False
+            elif not sleep_wait(interval):
+                return False
+            continue
+        if observed_hits < needed:
+            if not sleep_wait(interval):
+                return False
+            continue
+
+        if state in YANYUN_SYSTEM_STATES:
+            set_phase("connecting" if state in ("connecting", "connection_failed") else state)
+        elif state in ("home", "search"):
+            set_phase("home" if state == "home" else "spotlight_search")
+        else:
+            set_phase("game_" + state)
+        if goal == "playing" and state in YANYUN_PLAYING_STATES:
+            log("INFO", "已连续确认进入游戏，登录完成（%s）" % state)
+            return True
+        if state == "matching":
+            log("INFO", "已连续确认进入匹配，关闭游戏后台")
+            return kill_game_background({"required": True, "cards": 1})
+        if state in ("connecting", "launching"):
+            if now - state_since >= launch_wait:
+                if not recover("连接/加载长时间未完成", reconnect=state == "connecting"):
+                    return False
+            elif not sleep_wait(interval):
+                return False
+            continue
+        if state in ("connection_failed", "wrong_app"):
+            if not recover("连接失败" if state == "connection_failed" else "当前在其他应用", reconnect=state == "connection_failed"):
+                return False
+            continue
+
+        if state != action_state:
+            action_state, same_actions = state, 0
+        if same_actions >= max_same:
+            if not recover("页面 %s 操作后未变化" % state):
+                return False
+            continue
+        if state not in action_states:
+            if not recover("未配置的页面 %s" % state):
+                return False
+            continue
+        log("INFO", "根据当前页面 %s 执行下一步（第 %s 次）" % (state, same_actions + 1))
+        action = dict(step, _action_attempt=same_actions)
+        ok = _yanyun_page_action(state, items, action)
+        same_actions += 1
+        if should_stop():
+            return False
+        if not ok:
+            log("WARN", "当前页面操作未成功，重新观察后再决定")
+        if not sleep_wait(interval):
+            return False
+        pending_from = state
+        pending_deadline = time.monotonic() + transition_timeout
+        if state in ("home", "search", "start_game", "continue_game", "enter_game"):
+            settle_until = time.monotonic() + launch_wait
+        observed_state, observed_hits = "", 0
+    save_shot("yanyun_flow_timeout")
+    log("WARN", "燕云状态流程超时，保留当前页面供下次继续")
+    return False
 
 
 def wait_match_and_kill(step):
@@ -4960,8 +5617,12 @@ def kill_game_background(step=None):
     log("INFO", "上滑打开多任务")
     drag_outer(0.50, 0.96, 0.50, 0.42)
     time.sleep(1.0)
-    # 上滑关掉中间/偏左卡片（镜像里常见）
-    for fx in (0.50, 0.28, 0.72):
+    # 登录冷启动只关最近的当前游戏卡片；旧脚本可继续按 cards=3 清多张。
+    try:
+        card_count = max(1, min(3, int(step.get("cards", 3))))
+    except (TypeError, ValueError):
+        card_count = 3
+    for fx in (0.50, 0.28, 0.72)[:card_count]:
         if should_stop():
             break
         log("INFO", "上滑关掉后台卡片 %.2f" % fx)
@@ -4981,6 +5642,10 @@ def ocr_flow(step):
     stop_when = [k for k in (step.get("stop_when") or []) if k]
     tap_above = float(step.get("tap_above") or 0)
     name = step.get("name") or "识图"
+    verify_stages = bool(step.get("verify_stages", False))
+    stage_confirmations = max(2, int(step.get("stage_confirmations") or 2))
+    observed_stage = ""
+    observed_hits = 0
     log("INFO", "开始识图流程：%s" % name)
     used = {}
     end = time.time() + timeout
@@ -4991,9 +5656,29 @@ def ocr_flow(step):
         names = [i.get("text") for i in items if i.get("text")]
         if names:
             log("INFO", "识图: %s" % "、".join(names[:18]))
+        if verify_stages:
+            stage = moyu_progress(items)
+            if stage == observed_stage:
+                observed_hits += 1
+            else:
+                observed_stage = stage
+                observed_hits = 1
+            if stage == "unknown":
+                time.sleep(interval)
+                continue
+            if observed_hits < stage_confirmations:
+                log("INFO", "登录阶段候选「%s」%s/%s，再识别一次确认" % (
+                    stage, observed_hits, stage_confirmations,
+                ))
+                time.sleep(interval)
+                continue
         if stop_when and match_app_item(items, stop_when):
             save_shot("flow_done_" + name)
             log("INFO", "识图完成：%s" % name)
+            return True
+        if step.get("stop_on_gameplay") and looks_like_gameplay_hud(items):
+            save_shot("flow_done_gameplay_" + name)
+            log("INFO", "已进入游戏场景：%s" % name)
             return True
         acted = False
         for i, rule in enumerate(taps):
@@ -5034,7 +5719,11 @@ def ocr_flow(step):
                 acted = True
                 time.sleep(float(rule.get("wait") or 1.2))
                 break
-            point = rule.get("point")
+            point = (
+                rule.get("point_port") if is_portrait_window()
+                else rule.get("point_land")
+            )
+            point = point or rule.get("point")
             if point and len(point) >= 2 and not hit:
                 if kws and not when:
                     continue
@@ -5060,7 +5749,10 @@ def ocr_flow(step):
                     acted = True
                     time.sleep(float(rule.get("wait") or 1.2))
                     break
-        if not acted:
+        if acted:
+            observed_stage = ""
+            observed_hits = 0
+        else:
             time.sleep(interval)
     if stop_when:
         save_shot("flow_timeout_" + name)
@@ -5192,22 +5884,35 @@ def run_step(step):
         return find_icon_click(step)
     if kind == "tap_text":
         return tap_text(step)
+    if kind == "yanyun_flow":
+        return run_moyu_flow(dict(step, goal=step.get("goal") or "playing"))
+    if kind == "moyu_flow":
+        return run_moyu_flow(step)
     if kind == "wait_match_and_kill":
         return wait_match_and_kill(step)
     if kind == "kill_game_background":
         return kill_game_background(step)
     if kind == "tap_point":
+        point = (
+            step.get("point_port") if is_portrait_window()
+            else step.get("point_land")
+        )
+        point = point or [step.get("fx", 0.5), step.get("fy", 0.5)]
+        clicks = max(1, int(step.get("clicks") or 1))
+        wait_after = max(0.0, float(step.get("wait") or 0.0))
         # 普通给坐标：与登录 close_popups 同路，不传整份 step
         # 只有带 outer 锚点的录制回放才走 resolve
-        if step.get("outer"):
-            return tap_point(
-                step.get("fx") or 0.5, step.get("fy") or 0.5,
-                step=step, source="step",
+        for index in range(clicks):
+            ok = tap_point(
+                point[0], point[1],
+                step=step if (step.get("outer") or step.get("force_hid")) else None,
+                source="step",
             )
-        return tap_point(
-            step.get("fx") or 0.5, step.get("fy") or 0.5,
-            source="step",
-        )
+            if not ok:
+                return False
+            if index + 1 < clicks:
+                time.sleep(0.35)
+        return sleep_wait(wait_after)
     if kind == "replay_recording":
         return replay_recording(step)
     log("WARN", "未知步骤: %s" % kind)
@@ -5450,19 +6155,29 @@ def run_steps(steps, config=None):
 
 
 def run_task(config, options=None, manage_session=True):
-    options = options or {}
+    options = dict(options or {})
     if manage_session:
         start_run_session()
     name = config.get("name") or config.get("id") or "未命名配置"
     log("INFO", "使用配置：%s" % name)
     ok = True
     use_common = config.get("use_common", True)
-    kill_mode = resolve_kill_mirror(options.get("kill_mirror", "auto"))
+    resume_from_current = bool(config.get("resume_from_current"))
+    kill_mode = (
+        "always" if config.get("restart_mirror_before_run") and not resume_from_current
+        else resolve_kill_mirror(options.get("kill_mirror", "auto"))
+    )
     if kill_mode == "always" and not options.get("mirror_ready"):
         ok = restart_mirror()
         if ok:
             options["mirror_ready"] = True
             options["kill_mirror"] = False
+    if ok and resume_from_current:
+        log("INFO", "从当前页面识别进度并继续")
+    elif ok and not options.get("home_ready"):
+        ok = prepare_task_home()
+        if ok:
+            options["home_ready"] = True
     if ok and use_common:
         search_name = (config.get("search") or "").strip()
         keywords = config.get("keywords") or []
@@ -5502,27 +6217,46 @@ def run_task(config, options=None, manage_session=True):
 
 def run_queue(configs, options=None):
     options = options or {}
+    # Permission must be known before a run can kill/reopen the mirror or touch
+    # the phone. This also makes CLI callers obey the same safe ordering as UI.
+    if not ensure_screen_capture_access(request=True):
+        log("WARN", "启动已取消：尚未获得屏幕录制权限，手机和 iPhone 镜像均未操作")
+        return False
     start_run_session()
     global current_account
     current_account = ""
     opts = dict(options)
     ok = True
-    kill_mode = resolve_kill_mirror(opts.get("kill_mirror", "auto"))
+    items = list(configs or [])
+    first_config = items[0] if items else {}
+    resume_from_current = bool(first_config.get("resume_from_current"))
+    config_forces_restart = bool(first_config.get("restart_mirror_before_run")) and not resume_from_current
+    kill_mode = (
+        "always" if config_forces_restart
+        else resolve_kill_mirror(opts.get("kill_mirror", "auto"))
+    )
     if kill_mode == "always":
-        log("INFO", "横屏策略：强制重启镜像")
+        reason = "首个脚本要求" if config_forces_restart else "界面选项要求"
+        log("INFO", "横屏策略：强制重启镜像（%s）" % reason)
         ok = restart_mirror()
         opts["kill_mirror"] = False
-        opts["mirror_ready"] = True
+        opts["mirror_ready"] = bool(ok)
     elif kill_mode == "auto":
-        log("INFO", "横屏策略：auto（已在横屏游戏则不杀镜像；竖屏才 recover）")
+        if resume_from_current:
+            log("INFO", "横屏策略：auto（保留当前页面，由脚本识别进度）")
+        else:
+            log("INFO", "横屏策略：auto（已在横屏游戏则不杀镜像；竖屏才 recover）")
         opts["kill_mirror"] = False
         opts["mirror_ready"] = True
     else:
         log("INFO", "横屏策略：不杀镜像")
         opts["kill_mirror"] = False
         opts["mirror_ready"] = True
+    if ok and not resume_from_current:
+        log("INFO", "统一起点：先触发主屏幕控制并确认手机桌面")
+        ok = prepare_task_home()
+        opts["home_ready"] = bool(ok)
     log_window_geom("queue_start")
-    items = list(configs or [])
     total = len(items)
     for i, cfg in enumerate(items):
         if should_stop() or not ok:
@@ -5545,6 +6279,11 @@ def run_queue(configs, options=None):
                 cfg["keep_alive"] = False
         task_opts = dict(opts)
         task_opts["kill_mirror"] = False
+        if i:
+            # Readiness describes the first task's prepared screen only. A later
+            # task must honor its own startup policy and inspect its own screen.
+            task_opts.pop("home_ready", None)
+            task_opts.pop("mirror_ready", None)
         ok = run_task(cfg, task_opts, manage_session=False)
         if not ok:
             record_error("队列在此停止", cfg.get("name") or "")

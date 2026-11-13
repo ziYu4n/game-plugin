@@ -18,3 +18,7 @@ scripts/launcher
 build/
 tmp/
 *.app/
+.course-build/
+.ppt-build/
+.recruitment-build/
+output/

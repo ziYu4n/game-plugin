@@ -1,5 +1,12 @@
 #!/bin/bash
 set -e
+
+if [ "${ENABLE_LEGACY_DESKTOP_APP:-}" != "1" ]; then
+  echo "桌面 App 模式已停用。请双击桌面的“脚本合集-网页启动.command”。"
+  echo "如需保留旧版做诊断，请显式设置 ENABLE_LEGACY_DESKTOP_APP=1。"
+  exit 2
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build"
 APP="$BUILD/脚本合集.app"
@@ -12,7 +19,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 sed "s|__PROJECT_ROOT__|$ROOT|g" "$ROOT/scripts/launcher.swift" > "$BUILD/launcher.swift"
 
-swiftc -O -o "$APP/Contents/MacOS/ScriptBox" "$BUILD/launcher.swift" -framework Cocoa
+export CLANG_MODULE_CACHE_PATH="/private/tmp/game-plugin-clang-cache"
+export SWIFT_MODULECACHE_PATH="/private/tmp/game-plugin-swift-cache"
+swiftc -target arm64-apple-macosx14.0 -O -o "$APP/Contents/MacOS/ScriptBox" "$BUILD/launcher.swift" -framework Cocoa
 chmod +x "$APP/Contents/MacOS/ScriptBox"
 
 if [ -f "$ICON_JPG" ]; then
@@ -61,14 +70,24 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <false/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>用于识别 iPhone 镜像中的游戏页面并执行已配置的步骤。</string>
 </dict>
 </plist>
 PLIST
 
+xattr -cr "$APP" 2>/dev/null || true
+# Use a stable designated requirement. Without it, every local rebuild gets a
+# new CDHash and macOS treats the already-authorized app as a different client.
+codesign --force --deep --sign - \
+  --identifier local.game-plugin.scriptbox \
+  --requirements '=designated => identifier "local.game-plugin.scriptbox"' \
+  "$APP"
+codesign --verify --deep --strict "$APP"
+
 rm -rf "$DESKTOP" "$OLD_DESKTOP"
 cp -R "$APP" "$DESKTOP"
 xattr -cr "$DESKTOP" 2>/dev/null || true
-xattr -cr "$APP" 2>/dev/null || true
 
 echo "已放到桌面：$DESKTOP"
 echo "项目里也有一份：$APP"

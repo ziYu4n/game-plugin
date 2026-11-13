@@ -2,7 +2,6 @@ import Cocoa
 import Darwin
 
 let projectRoot = "__PROJECT_ROOT__"
-let startCommand = (projectRoot as NSString).appendingPathComponent("start.command")
 let pidFile = (projectRoot as NSString).appendingPathComponent("logs/gui.pid")
 let bundleId = "local.game-plugin.scriptbox"
 
@@ -23,18 +22,52 @@ func appendLog(_ text: String) {
     try? handle.close()
 }
 
-func pythonRunning() -> Bool {
-    guard let raw = try? String(contentsOfFile: pidFile, encoding: .utf8) else { return false }
-    guard let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1 else { return false }
+func pidAlive(_ pid: Int32) -> Bool {
+    guard pid > 1 else { return false }
     if kill(pid, 0) == 0 { return true }
     return errno == EPERM
+}
+
+func discoverPythonPid() -> Int32? {
+    let task = Process()
+    let pipe = Pipe()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+    task.arguments = ["-f", "\(projectRoot)/gui.py"]
+    task.standardOutput = pipe
+    task.standardError = FileHandle.nullDevice
+    do {
+        try task.run()
+        task.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let text = String(data: data, encoding: .utf8) ?? ""
+        for line in text.split(whereSeparator: { $0.isWhitespace }) {
+            if let pid = Int32(line), pidAlive(pid) { return pid }
+        }
+    } catch {
+        appendLog("查找现有 python 失败 \(error.localizedDescription)")
+    }
+    return nil
+}
+
+func pythonRunning() -> Bool {
+    if let raw = try? String(contentsOfFile: pidFile, encoding: .utf8),
+       let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+       pidAlive(pid) {
+        return true
+    }
+    if let pid = discoverPythonPid() {
+        try? "\(pid)".write(toFile: pidFile, atomically: true, encoding: .utf8)
+        appendLog("复用现有 python pid=\(pid)")
+        return true
+    }
+    return false
 }
 
 func activateWindow() {
     for app in NSWorkspace.shared.runningApplications {
         let name = app.executableURL?.lastPathComponent ?? ""
         if name == "appwin" {
-            _ = app.activate(options: [.activateIgnoringOtherApps])
+            _ = app.activate(options: [])
         }
     }
 }
@@ -45,36 +78,22 @@ func openStart() {
         DispatchQueue.main.async { activateWindow() }
         return
     }
-    appendLog("打开 start.command")
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    task.arguments = [startCommand]
-    task.standardOutput = Pipe()
-    task.standardError = Pipe()
-    do {
-        try task.run()
-        task.waitUntilExit()
-        appendLog("open 退出码 \(task.terminationStatus)")
-    } catch {
-        appendLog("open 失败 \(error.localizedDescription)")
-    }
-    usleep(1200000)
-    if pythonRunning() {
-        appendLog("界面已起来")
-        DispatchQueue.main.async { activateWindow() }
-        return
-    }
-    appendLog("改为直接启动 python")
+    appendLog("后台启动 python（不打开终端）")
     let py = Process()
     py.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
     py.arguments = [(projectRoot as NSString).appendingPathComponent("gui.py")]
     py.currentDirectoryURL = URL(fileURLWithPath: projectRoot)
-    py.standardOutput = Pipe()
-    py.standardError = Pipe()
+    py.standardOutput = FileHandle.nullDevice
+    py.standardError = FileHandle.nullDevice
+    var environment = ProcessInfo.processInfo.environment
+    environment["PYTHONUNBUFFERED"] = "1"
+    py.environment = environment
     do {
         try py.run()
         keptPython = py
         appendLog("python pid=\(py.processIdentifier)")
+        usleep(1000000)
+        DispatchQueue.main.async { activateWindow() }
     } catch {
         appendLog("python 启动失败 \(error.localizedDescription)")
     }

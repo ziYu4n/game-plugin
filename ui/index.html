@@ -384,6 +384,7 @@
     .bottom-main { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
     .switches { display: flex; flex-wrap: wrap; gap: 16px; color: var(--text); }
     .switches label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .switches .schedule-status { color: var(--muted); font-size: 12px; }
     .bar { display: flex; gap: 8px; flex-wrap: wrap; }
     .bar .lock-on { background: #fff4e5; color: #9a5b00; }
     .bar .lock-off { background: #e8f8ee; color: #1a7f37; }
@@ -529,9 +530,13 @@
       </div>
       <div class="bottom-main">
       <div class="switches">
-        <label><input type="checkbox" id="kill" checked /> 智能启动（一般不必强杀镜像；横竖屏都跑）</label>
+        <label><input type="checkbox" id="kill" checked /> 启动前强制重启 iPhone 镜像（保证首次进游戏自动横屏）</label>
         <label><input type="checkbox" id="watch" checked /> 窗口没了就停止</label>
         <label><input type="checkbox" id="reconnect" /> 断线自动重连</label>
+        <label>
+          <input type="checkbox" id="repeatMoyu" /> 觉障林每 30 分钟运行
+          <span class="schedule-status" id="repeatMoyuStatus"></span>
+        </label>
       </div>
       <div class="bar">
         <button class="primary" id="start">开始</button>
@@ -542,7 +547,8 @@
         <button id="recStart">开始录制</button>
         <button id="recStop">结束录制</button>
         <button id="recCancel">取消录制</button>
-        <button id="selfRestart" title="只重启界面加载新 UI；不重编工具">重启界面</button>
+        <button id="screenPerm" title="只检查权限，不操作手机">检查截屏权限</button>
+        <button id="selfRestart" title="重新加载当前网页">刷新页面</button>
         <button class="danger" id="clearErr">清空错误</button>
       </div>
       <div class="calib-row">
@@ -787,6 +793,19 @@
         + (data.phase ? " · " + data.phase : "");
       const idle = data.state === "idle";
       uiIdle = idle;
+      const repeat = data.repeat_moyu || {};
+      const repeatBox = document.getElementById("repeatMoyu");
+      repeatBox.checked = !!repeat.enabled;
+      const repeatStatus = document.getElementById("repeatMoyuStatus");
+      if (repeat.running) {
+        repeatStatus.textContent = "本轮运行中";
+      } else if (repeat.enabled && repeat.next_at) {
+        repeatStatus.textContent = "下次 " + new Date(repeat.next_at * 1000).toLocaleTimeString("zh-CN", {
+          hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
+        });
+      } else {
+        repeatStatus.textContent = "";
+      }
       const acc = data.account || "";
       const box = document.getElementById("accountBox");
       const img = document.getElementById("accountImg");
@@ -1055,7 +1074,14 @@
     document.getElementById("clearQ").onclick = function () {
       post("/api/queue/clear").then(function () { selected = null; });
     };
-    document.getElementById("start").onclick = function () { post("/api/start", options()); };
+    document.getElementById("start").onclick = function () {
+      post("/api/start", options()).then(function (r) {
+        if (r && !r.ok && r.error) alert(r.error);
+      });
+    };
+    document.getElementById("repeatMoyu").onchange = function () {
+      post("/api/repeat/moyu", { enabled: this.checked }).then(tick);
+    };
     document.getElementById("pause").onclick = function () { post("/api/pause"); };
     document.getElementById("stop").onclick = function () { post("/api/stop"); };
     document.getElementById("lockGame").onclick = function () { post("/api/overlay/lock"); };
@@ -1277,31 +1303,20 @@
       });
     };
     document.getElementById("recCancel").onclick = function () { post("/api/record/cancel"); };
-    var restartArmedAt = 0;
-    document.getElementById("selfRestart").onclick = function () {
-      var btn = document.getElementById("selfRestart");
-      var now = Date.now();
-      if (now - restartArmedAt > 2500) {
-        restartArmedAt = now;
-        btn.textContent = "再点确认重启";
-        setTimeout(function () {
-          if (btn.textContent === "再点确认重启") btn.textContent = "重启界面";
-        }, 2500);
-        return;
-      }
-      restartArmedAt = 0;
+    document.getElementById("screenPerm").onclick = function () {
+      var btn = document.getElementById("screenPerm");
       btn.disabled = true;
-      btn.textContent = "重启中…";
-      // 禁止 rebuild：重编 wininfo/overlay 会换 CDHash，再弹屏幕录制
-      post("/api/self-restart", { rebuild: false }).then(function (r) {
-        if (!r || !r.ok) {
-          btn.disabled = false;
-          btn.textContent = "重启界面";
-        }
-      }).catch(function () {
+      btn.textContent = "检查中…";
+      post("/api/perm-check", { request: true }).then(function (r) {
+        var perm = (r && r.perm) || {};
+        alert(perm.hint || (perm.authorized ? "权限正常" : "尚未授权"));
+      }).finally(function () {
         btn.disabled = false;
-        btn.textContent = "重启界面";
+        btn.textContent = "检查截屏权限";
       });
+    };
+    document.getElementById("selfRestart").onclick = function () {
+      window.location.reload();
     };
     document.getElementById("clearErr").onclick = function () { post("/api/clear-errors"); };
     document.getElementById("copyLogs").onclick = function () {

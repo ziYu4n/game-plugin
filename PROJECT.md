@@ -3,7 +3,7 @@
 > 用途：给其他 AI / 工程师做方案评审与优化。  
 > 仓库：`/Users/ziyuan/code/game-plugin`（远程 `git@github.com:ziYu4n/game-plugin.git`，`main` 可能尚无提交）  
 > 环境：macOS Darwin 27（Tahoe），官方 **iPhone 镜像**（`/System/Applications/iPhone Mirroring.app`）  
-> 文档日期：2026-09-17
+> 文档日期：2026-10-13
 
 ---
 
@@ -13,13 +13,13 @@
 
 1. 打开 / 保活 iPhone 镜像  
 2. OCR 判断锁屏 → 从钥匙串取密码自动解锁（不移动用户鼠标）  
-3. 回主屏幕 → Spotlight 搜索 → 打开游戏  
+3. 从当前页面识别进度并继续；需要打开游戏时才回主屏幕 → Spotlight 搜索  
 4. **第一次进游戏必须横屏**（同一轮镜像里再开一次会变竖屏）  
 5. 识别并点击公告页 **返回图标** → 点「继续游戏」  
 6. OCR 识别账号并在 UI 左下角展示  
 7. 队列执行、日志可复制、错误暂存可手动清空  
 
-桌面应用名：**脚本合集**。
+产品名：**脚本合集**。当前只保留浏览器控制台作为正式入口，桌面 App 已停用。
 
 ### 明确不做 / 暂缓
 
@@ -35,8 +35,8 @@
 | 层 | 技术 | 说明 |
 |----|------|------|
 | 编排 / 业务 | Python 3.9（CLT 自带） | `mirror_keeper.py` + `gui.py`，无第三方业务依赖（OCR 匹配用到系统自带 **Pillow**） |
-| GUI | 本地 HTTP + WKWebView | 不用 Tk（本机 Tk Label/Listbox/Text 空白）；`ui/index.html` + `scripts/appwin` |
-| 桌面壳 | Swift + Cocoa | `launcher.swift` → `脚本合集.app`；只负责拉起 `start.command` / `gui.py` |
+| GUI | 本地 HTTP + 浏览器 | `gui.py --serve` 提供 API 与 `ui/index.html`；浏览器只访问 `127.0.0.1` |
+| 启动入口 | shell command | 桌面 `脚本合集-网页启动.command` → `start.command`；后台只维持一个网页服务 |
 | 窗口检测 | Swift CoreGraphics | `wininfo.swift` → `CGWindowListCopyWindowInfo` |
 | 截图 | `screencapture -l <windowId>` | 对镜像窗口截图；`-R` 区域截图在本机常失败 |
 | OCR | Swift Vision | `ocr.swift`，`--boxes` / `--accurate`，中英识别 |
@@ -50,7 +50,7 @@
 
 - 辅助功能（Accessibility）：注入点击/按键  
 - 屏幕录制：截图 OCR  
-- 负责进程通常是：**终端 / Python.app / 脚本合集** 之一；重建 `.app` 或 codesign 会重置授权  
+- 网页入口由终端启动，权限主体通常是：**终端 / Python**；不再依赖桌面 App 的签名和授权
 
 ---
 
@@ -59,7 +59,7 @@
 ```
 game-plugin/
 ├── coords.py                  # 统一坐标换算（outer/screen/shot）
-├── start.command              # 双击入口 → python3 gui.py
+├── start.command              # 网页入口：复用或启动 gui.py --serve，再打开浏览器
 ├── gui.py                     # HTTP API + 队列 UI 状态 + 遮罩控制
 ├── mirror_keeper.py           # 核心自动化
 ├── ui/index.html              # 脚本合集前端
@@ -72,9 +72,10 @@ game-plugin/
 │   ├── starrail/              # 手点脚本保存目录（星穹铁道）
 │   └── keep_alive.json        # 保活（列表隐藏）
 ├── scripts/
-│   ├── launcher.swift         # 桌面 App 启动器（Cocoa NSApp）
-│   ├── make-desktop-app.sh    # 编译并复制到 ~/Desktop/脚本合集.app
-│   ├── appwin.swift           # WKWebView 窗口
+│   ├── desktop-web-launcher.command # 桌面网页入口模板
+│   ├── launcher.swift         # 旧桌面 App 启动器（已停用，仅归档）
+│   ├── make-desktop-app.sh    # 旧桌面 App 构建器（默认拒绝运行）
+│   ├── appwin.swift           # 旧 WKWebView 窗口（已停用）
 │   ├── wininfo.swift          # 镜像窗口 bounds + windowId
 │   ├── ocr.swift              # Vision OCR
 │   ├── click.swift            # postToPid 点击/拖/热键/打字
@@ -95,24 +96,28 @@ game-plugin/
 ## 4. 架构与数据流
 
 ```
-用户双击 脚本合集.app
-    → ScriptBox(launcher) 检测 logs/gui.pid
-    → open start.command 或直接 python3 gui.py
+用户双击 脚本合集-网页启动.command
+    → start.command 校验 logs/gui.pid 与 logs/gui.url
+    → 已有服务：直接打开现有 URL
+    → 没有服务：交给 launchd 后台启动 python3 gui.py --serve
         → ThreadingHTTPServer 127.0.0.1:随机端口
-        → Popen(appwin, url) 显示 Web UI
+        → 写入 logs/gui.url，再由默认浏览器打开
             ←→ /api/state|start|queue|overlay|calibrate...
 
 点「开始」
     → run_queue(configs)
-        →（可选）kill -9 镜像进程并重开   ← 为了「第一次进游戏横屏」
-        → open_game_once()
-            → wait_mirror_ready / unlock / 已在游戏则不回桌面
-            → 否则 go_home → open_search(cmd-3) → type 中文搜索 → 打开
-            → 若竖屏 → recover_landscape（再强制退出镜像，避免第二次打开）
+        →（界面明确选择时）强制重启镜像
+        → 支持续跑的脚本保留当前页面，识别后执行下一步
+            → 手机桌面 / 锁屏 / 搜索 / 启动页 → 按需打开游戏
+            → 公告 / 继续游戏 / 在线确认 / 选角 → 继续登录
+            → 游戏内 / 同游 / 止戈 / 觉障林 / 匹配 → 从当前进度继续
+        → 其他脚本仍按配置回桌面并运行通用前置
         → run_steps(脚本 steps)
-            → wait_screen / close_popups / read_account / ocr_flow
+            → yanyun_flow / moyu_flow / wait_screen / ocr_flow 等
         → watch_loop（可选看守）
 ```
+
+「登录游戏」与「觉障林」配置启用 `resume_from_current`，跳过强制回桌面与配置要求的重启。登录使用 `yanyun_flow`，以确认进入游戏为完成条件；觉障林使用 `moyu_flow`，以确认匹配为完成条件。每次操作后重新识别页面；出现已知的前序页面时，重新同步进度并继续，未知页面则在有限次数内尝试恢复。界面的「启动前强制退出镜像」仍会按用户选择执行。
 
 ### 坐标约定（当前实现）
 
@@ -159,6 +164,8 @@ game-plugin/
 步骤类型（`run_step`）：  
 `ensure_mirror` / `restart_mirror` / `unlock_if_needed` / `go_home` / `open_search` / `find_and_open_app` / `wait_screen` / `ocr_flow` / `close_popups` / `read_account` / `tap_point`
 
+燕云进度识别步骤：`yanyun_flow`（登录至游戏内）/ `moyu_flow`（继续至觉障林匹配）。
+
 ### 5.2 `gui.py` + `ui/index.html`
 
 - 左：脚本树（燕云 / 星穹铁道），**双击添加**（只显示功能名）  
@@ -176,12 +183,12 @@ API 摘要：
 - `POST /api/calibrate/click`（遮罩点击回调）  
 - `GET /api/account.png` / `/api/shot.png`  
 
-### 5.3 桌面 App（`launcher.swift`）
+### 5.3 网页启动器（`start.command`）
 
-- 必须是真正的 `NSApplication`（否则系统报「没有响应」）  
-- **不**内嵌 WKWebView、**不**做 ScreenCaptureKit  
-- 用 `logs/gui.pid` 判断 GUI 是否在跑（避免 `ps` 扫进程误判 / 堵主线程）  
-- `open start.command`，失败再直接起 `python3 gui.py`  
+- 通过 `launchctl submit` 独立启动 `gui.py --serve`，终端退出后服务仍保留
+- 同时校验 PID、进程命令和本地 URL，避免复用无关或失效进程
+- 服务地址写入 `logs/gui.url`，重复双击只打开同一个网页服务
+- 桌面快捷入口为 `~/Desktop/脚本合集-网页启动.command`
 
 ### 5.4 图标匹配（`match.py`）
 
@@ -291,7 +298,7 @@ python3 scripts/verify_shot_space.py
 - [x] 项目骨架、日志、错误暂存、钥匙串密码  
 - [x] 窗口检测、截图、Vision OCR、postToPid 点击  
 - [x] Web UI 脚本树 / 队列 / 开始暂停停止  
-- [x] 桌面 App「脚本合集」可响应、可拉起 GUI  
+- [x] 网页启动器可复用单一后台服务并打开浏览器
 - [x] 燕云：登录游戏、觉樟林配置  
 - [x] 横屏策略（强制退出镜像 + 只打开一次）  
 - [x] 关公告：图标识别 + 校验截图 `logs/shots/`  
@@ -303,7 +310,7 @@ python3 scripts/verify_shot_space.py
 
 - [~] 竖屏镜像下图标匹配（旋转 ROI，成功率低于横屏）  
 - [~] 回主屏幕在复杂 App 内有时需多次 cmd-1  
-- [~] 「继续游戏」后进游戏内流程仅做到识别停词  
+- [~] 登录与觉障林已按阶段连续确认，仍需实机覆盖更多异常页面
 - [~] 账号 OCR 裁剪展示  
 
 ### 未完成
@@ -311,8 +318,8 @@ python3 scripts/verify_shot_space.py
 - [ ] 星穹铁道任意脚本  
 - [ ] 可靠切号  
 - [ ] 游戏内任务链（觉樟林具体玩法步骤）  
-- [ ] 权限一劳永逸（重建 app 仍可能丢 TCC）  
-- [ ] 自动化测试 / CI  
+- [ ] 权限一劳永逸（终端或 Python 的 TCC 仍需用户首次确认）
+- [ ] CI（本地自动化测试已覆盖核心状态判断与网页启动）
 - [ ] Git 首次正式提交与 README（用户未要求前不要擅自 commit）  
 
 ---
@@ -320,18 +327,14 @@ python3 scripts/verify_shot_space.py
 ## 8. 运行方式
 
 ```bash
-# 开发
+# 网页启动（推荐；桌面快捷方式执行的也是这个入口）
 cd /Users/ziyuan/code/game-plugin
 ./start.command
-# 或
-/usr/bin/python3 ./gui.py
-
-# 重建桌面图标
-bash scripts/make-desktop-app.sh
-# 产出：~/Desktop/脚本合集.app 与 build/脚本合集.app
 ```
 
-**建议权限勾选：** 终端、Python、脚本合集 → 辅助功能 + 屏幕录制。  
+不要直接双击 `ui/index.html`：`file://` 页面没有本地 API，按钮无法控制脚本。
+
+**建议权限勾选：** 终端、Python → 辅助功能 + 屏幕与系统音频录制。
 **建议开关：** 「启动前强制退出镜像」保持勾选。
 
 CLI 保活（无 UI）：
@@ -371,6 +374,7 @@ python3 mirror_keeper.py --self-test
 7. 无 NSApplication 的 headless 启动器（系统报「没有响应」）  
 8. 对桌面 App 反复 `codesign --sign -`（重置 TCC）  
 9. 关公告点「屏幕右上角固定 0.94,0.11」而不做识别（竖屏/黑边必偏）  
+10. 桌面 `.app` / WKWebView 作为正式入口（改用本地网页，避免权限身份漂移）
 
 ---
 
@@ -428,7 +432,7 @@ python3 mirror_keeper.py --self-test
 
 ## 13. 一句话现状
 
-> 燕云登录可用；手点可存到 `configs/yanyun|starrail`。  
+> 网页控制台是唯一正式入口；登录与觉障林在每次动作前后都会核对当前阶段。
 > 坐标方案已落地：`coords.py` + 截图去阴影 + CG 锚点回放 + shot 像素红点。  
 > **请开镜像跑 `python3 scripts/verify_shot_space.py` 并重录一段验收**（旧录制无完整锚点，建议重录）。
 
@@ -447,7 +451,9 @@ python3 mirror_keeper.py --self-test
 | `scripts/clickwatch.swift` | 无遮罩手点监听 |
 | `scripts/match.py` | 返回图标识别 |
 | `scripts/overlay.swift` | 坐标校准遮罩 |
-| `scripts/launcher.swift` | 桌面启动器 |
+| `start.command` | 网页服务与浏览器启动入口 |
+| `scripts/desktop-web-launcher.command` | 桌面网页快捷入口模板 |
+| `scripts/launcher.swift` | 已停用的旧桌面启动器 |
 | `configs/yanyun_login.json` | 登录流程配置 |
 | `icons/back.png` | 返回按钮模板 |
 

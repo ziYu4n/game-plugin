@@ -32,6 +32,8 @@ from dataclasses import asdict, dataclass
 import json
 import os
 
+from storage import atomic_write_json
+
 
 @dataclass
 class Rect:
@@ -274,8 +276,8 @@ def save_metrics_config(path, m):
     folder = os.path.dirname(path)
     if folder:
         os.makedirs(folder, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(path, data)
+    return data
 
 
 def load_metrics_config(path):

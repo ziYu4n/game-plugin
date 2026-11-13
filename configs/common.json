@@ -11,6 +11,9 @@
     "mode": "soft",
     "auto_tries": 2,
     "manual_timeout": 90,
+    "respect_user_input": true,
+    "min_idle": 0.8,
+    "idle_wait": 6.0,
     "note": "soft/pid=只注入镜像进程（不会点到脚本合集）；遍历用独立HID；hid=瞬移光标；assist=人手+F8"
   },
   "steps": [
@@ -19,7 +22,8 @@
     {
       "type": "go_home",
       "hotkey": "cmd-1",
-      "click_bar": true
+      "attempts": 2,
+      "gesture_fallback": false
     },
     { "type": "open_search" }
   ]

@@ -14,9 +14,11 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import mirror_keeper as mk
+from storage import atomic_write_json
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PID_FILE = os.path.join(ROOT, "logs", "gui.pid")
+URL_FILE = os.path.join(ROOT, "logs", "gui.url")
 UI_FILE = os.path.join(ROOT, "ui", "index.html")
 APPWIN_SRC = os.path.join(ROOT, "scripts", "appwin.swift")
 APPWIN_BIN = os.path.join(ROOT, "scripts", "appwin")
@@ -27,6 +29,9 @@ WATCH_SRC = os.path.join(ROOT, "scripts", "clickwatch.swift")
 WATCH_BIN = os.path.join(ROOT, "scripts", "clickwatch")
 WATCH_CTRL = os.path.join(ROOT, "data", "clickwatch.lock")
 QUEUE_FILE = os.path.join(ROOT, "data", "queue.json")
+SCHEDULE_FILE = os.path.join(ROOT, "data", "schedule.json")
+REPEAT_MOYU_ID = "yanyun_moyu"
+REPEAT_MOYU_SECONDS = 30 * 60
 
 STATE_TEXT = {
     "idle": "未开始",
@@ -34,11 +39,14 @@ STATE_TEXT = {
     "paused": "已暂停",
     "stop": "正在停止",
 }
+MAX_REQUEST_BYTES = 1024 * 1024
 
 
 class App:
     def __init__(self):
         self.lock = threading.Lock()
+        self.start_lock = threading.Lock()
+        self.repeat_lock = threading.Lock()
         self.queue_items = []
         self.logs = []
         self.worker = None
@@ -55,22 +63,116 @@ class App:
         self.calib_retap = True  # 校准后是否自动复点（白名单内）
         self._calib_busy_until = 0.0  # 防抖：避免 HID 复点再打到遮罩连环触发
         self.api_base = ""
+        self.repeat_moyu_enabled = False
+        self.repeat_moyu_next_at = 0.0
+        self.repeat_moyu_running = False
+        self.repeat_thread = None
         mk.log_hook = self.enqueue_log
         self.load_queue()
+        self.load_repeat_schedule()
 
-    def enqueue_log(self, line):
-        with self.lock:
-            self.logs.append(line)
-            if len(self.logs) > 300:
-                self.logs = self.logs[-300:]
+    def load_repeat_schedule(self):
+        if not os.path.isfile(SCHEDULE_FILE):
+            return
+        try:
+            with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+        if not isinstance(data, dict) or not data.get("moyu_enabled"):
+            return
+        self.repeat_moyu_enabled = True
+        try:
+            saved_next = float(data.get("moyu_next_at") or 0)
+        except (TypeError, ValueError):
+            saved_next = 0
+        # App 重开后，过期任务尽快补跑；未来时间继续沿用。
+        self.repeat_moyu_next_at = max(time.time() + 2.0, saved_next)
+
+    def save_repeat_schedule(self):
+        with self.repeat_lock:
+            data = {
+                "moyu_enabled": bool(self.repeat_moyu_enabled),
+                "moyu_next_at": float(self.repeat_moyu_next_at or 0),
+                "interval_seconds": REPEAT_MOYU_SECONDS,
+            }
+        try:
+            atomic_write_json(SCHEDULE_FILE, data)
+        except Exception as e:
+            self.enqueue_log("保存觉障林定时设置失败：%s" % e)
+
+    def repeat_snapshot(self):
+        with self.repeat_lock:
+            return {
+                "enabled": bool(self.repeat_moyu_enabled),
+                "running": bool(self.repeat_moyu_running),
+                "next_at": float(self.repeat_moyu_next_at or 0),
+                "interval_seconds": REPEAT_MOYU_SECONDS,
+            }
+
+    def set_repeat_moyu(self, enabled):
+        enabled = bool(enabled)
+        with self.repeat_lock:
+            self.repeat_moyu_enabled = enabled
+            self.repeat_moyu_next_at = time.time() + 1.0 if enabled else 0.0
+        self.save_repeat_schedule()
+        if enabled:
+            self.enqueue_log("[定时] 已开启：立即运行一次觉障林，之后每 30 分钟运行")
+        else:
+            self.enqueue_log("[定时] 已关闭：不再启动下一轮觉障林")
+        return True, ""
+
+    def start_repeat_scheduler(self):
+        if self.repeat_thread and self.repeat_thread.is_alive():
+            return
+        self.repeat_thread = threading.Thread(target=self._repeat_loop, daemon=True)
+        self.repeat_thread.start()
+
+    def _repeat_loop(self):
+        while True:
+            with self.repeat_lock:
+                enabled = self.repeat_moyu_enabled
+                next_at = self.repeat_moyu_next_at
+                running = self.repeat_moyu_running
+            if enabled and not running and next_at and time.time() >= next_at:
+                if self.ui_state() == "idle" and not self.recording:
+                    ok, err = self.start_repeat_moyu()
+                    if not ok:
+                        self.enqueue_log("[定时] 觉障林启动失败：%s" % (err or "未知"))
+                        with self.repeat_lock:
+                            if self.repeat_moyu_enabled:
+                                self.repeat_moyu_next_at = time.time() + 30.0
+                        self.save_repeat_schedule()
+            time.sleep(1.0)
+
+    def start_repeat_moyu(self):
+        cfg = self.make_queue_item(REPEAT_MOYU_ID)
+        if not cfg:
+            return False, "找不到觉障林脚本"
+        with self.repeat_lock:
+            if not self.repeat_moyu_enabled or self.repeat_moyu_running:
+                return False, "定时任务未开启或已经在运行"
+            self.repeat_moyu_running = True
+            self.repeat_moyu_next_at = 0.0
+        self.save_repeat_schedule()
+        ok, err = self._launch_jobs(
+            [dict(cfg)],
+            {"kill_mirror": False, "watch_lost": False, "reconnect": False},
+            repeat_moyu=True,
+            title="定时觉障林",
+        )
+        if not ok:
+            with self.repeat_lock:
+                self.repeat_moyu_running = False
+            self.save_repeat_schedule()
+        return ok, err
 
     def save_queue(self):
         os.makedirs(os.path.dirname(QUEUE_FILE), exist_ok=True)
         with self.lock:
             ids = [item.get("id") for item in self.queue_items if item.get("id")]
         try:
-            with open(QUEUE_FILE, "w", encoding="utf-8") as f:
-                json.dump({"ids": ids}, f, ensure_ascii=False, indent=2)
+            atomic_write_json(QUEUE_FILE, {"ids": ids})
         except Exception as e:
             self.enqueue_log("保存执行列表失败：%s" % e)
 
@@ -173,6 +275,7 @@ class App:
             "calib_target": self.calib_target or "",
             "calib_retap": bool(self.calib_retap),
             "moyu_points": mk.moyu_points_summary(),
+            "repeat_moyu": self.repeat_snapshot(),
         }
 
     def write_overlay_ctrl(self, locked):
@@ -623,10 +726,6 @@ class App:
         return True, ""
 
     def start(self, options):
-        if self.ui_state() != "idle":
-            return False, "正在运行"
-        if self.recording:
-            return False, "请先结束或取消录制"
         with self.lock:
             if not self.queue_items:
                 return False, "请先从左侧加入脚本"
@@ -636,36 +735,70 @@ class App:
                 fresh = self.make_queue_item(item.get("id")) if item.get("id") else None
                 jobs.append(dict(fresh or item))
             self.queue_items = [dict(j) for j in jobs]
-        mk.run_mode = "running"
-        names = " → ".join(item.get("name") or item.get("id") for item in jobs)
-        self.enqueue_log("—— 开始队列：%s ——" % names)
-        # 纯手点回放：不要锁遮罩（遮罩会挡视线，也容易误以为没点上）
-        only_hand = True
-        for job in jobs:
-            for step in job.get("steps") or []:
-                if step.get("type") != "replay_recording":
-                    only_hand = False
-                    break
-            if not only_hand:
-                break
-        if only_hand:
-            self.set_overlay_locked(False)
-            self.enqueue_log("[回放] 手点脚本：已关遮罩；会把镜像置前再点（焦点不切回）")
-        else:
-            # 自动点击时遮罩会挡住游戏；默认不锁，需要校准再手动「锁定游戏」
-            self.set_overlay_locked(False)
-            self.enqueue_log("[提示] 已关遮罩，避免自动点击点到白色层；遍历时会出现红色圆点从左到右/从上到下移动")
-        self.worker = threading.Thread(target=self.run_keeper, args=(jobs, options), daemon=True)
-        self.worker.start()
-        return True, ""
+        return self._launch_jobs(jobs, options, repeat_moyu=False, title="队列")
 
-    def run_keeper(self, jobs, options):
+    def _launch_jobs(self, jobs, options, repeat_moyu=False, title="队列"):
+        with self.start_lock:
+            if self.ui_state() != "idle":
+                return False, "正在运行"
+            if self.recording:
+                return False, "请先结束或取消录制"
+            if not jobs:
+                return False, "没有可运行的脚本"
+            if not mk.ensure_screen_capture_access(request=True):
+                return False, (
+                    "屏幕录制未授权。请在系统设置的“隐私与安全性 → 屏幕与系统音频录制”中"
+                    "打开当前启动程序（网页启动通常是“终端”）；若系统提示，请选择退出并重新打开，"
+                    "再点开始。"
+                )
+            mk.run_mode = "running"
+            self.worker = threading.Thread(
+                target=self.run_keeper,
+                args=(jobs, options, repeat_moyu),
+                daemon=True,
+            )
+            names = " → ".join(item.get("name") or item.get("id") for item in jobs)
+            self.enqueue_log("—— 开始%s：%s ——" % (title, names))
+            # 纯手点回放：不要锁遮罩（遮罩会挡视线，也容易误以为没点上）
+            only_hand = True
+            for job in jobs:
+                for step in job.get("steps") or []:
+                    if step.get("type") != "replay_recording":
+                        only_hand = False
+                        break
+                if not only_hand:
+                    break
+            if only_hand:
+                self.set_overlay_locked(False)
+                self.enqueue_log("[回放] 手点脚本：已关遮罩；会把镜像置前再点（焦点不切回）")
+            else:
+                # 自动点击时遮罩会挡住游戏；默认不锁，需要校准再手动「锁定游戏」
+                self.set_overlay_locked(False)
+                self.enqueue_log("[提示] 已关遮罩，避免自动点击点到白色层；遍历时会出现红色圆点从左到右/从上到下移动")
+            self.worker.start()
+            return True, ""
+
+    def run_keeper(self, jobs, options, repeat_moyu=False):
         try:
             mk.run_queue(jobs, options)
         except Exception as e:
             mk.log("ERROR", "任务异常退出: %s" % e)
         finally:
             mk.run_mode = "idle"
+            if repeat_moyu:
+                with self.repeat_lock:
+                    self.repeat_moyu_running = False
+                    if self.repeat_moyu_enabled:
+                        self.repeat_moyu_next_at = time.time() + REPEAT_MOYU_SECONDS
+                        next_at = self.repeat_moyu_next_at
+                    else:
+                        self.repeat_moyu_next_at = 0.0
+                        next_at = 0.0
+                self.save_repeat_schedule()
+                if next_at:
+                    self.enqueue_log("[定时] 本轮结束，下次觉障林：%s" % time.strftime(
+                        "%H:%M:%S", time.localtime(next_at),
+                    ))
 
     def pause(self):
         if not (self.worker and self.worker.is_alive()):
@@ -711,13 +844,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def _body(self):
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("请求长度无效")
+        if length < 0 or length > MAX_REQUEST_BYTES:
+            raise ValueError("请求内容过大")
         if length <= 0:
             return {}
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8") or "{}")
-        except Exception:
-            return {}
+            data = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError("JSON 格式无效")
+        if not isinstance(data, dict):
+            raise ValueError("请求内容必须是 JSON 对象")
+        return data
 
     def do_GET(self):
         path = (self.path or "/").split("?")[0]
@@ -774,21 +915,34 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
-        data = self._body()
+        try:
+            data = self._body()
+        except ValueError as e:
+            self._json(400, {"ok": False, "error": str(e)})
+            return
         path = (self.path or "/").split("?")[0]
         ok, err = False, "未知接口"
         if path == "/api/queue/add":
             ok, err = APP.add_queue(data.get("id"))
         elif path == "/api/queue/remove":
-            ok, err = APP.remove_queue(int(data.get("index", -1)))
+            try:
+                index = int(data.get("index", -1))
+            except (TypeError, ValueError):
+                index = -1
+            ok, err = APP.remove_queue(index)
         elif path == "/api/queue/move":
-            ok, err = APP.move_queue(int(data.get("index", -1)), int(data.get("dir", 0)))
+            try:
+                index = int(data.get("index", -1))
+                direction = int(data.get("dir", 0))
+            except (TypeError, ValueError):
+                index, direction = -1, 0
+            ok, err = APP.move_queue(index, direction)
         elif path == "/api/queue/clear":
             ok, err = APP.clear_queue()
         elif path == "/api/start":
             options = {
-                # 勾选=auto（已横屏不杀）；不勾选=never
-                "kill_mirror": "auto" if data.get("kill_mirror", True) else False,
+                # 勾选=每轮强制重启镜像；登录脚本也可在配置中强制要求。
+                "kill_mirror": "always" if data.get("kill_mirror", True) else False,
                 "watch_lost": bool(data.get("watch_lost", True)),
                 "reconnect": bool(data.get("reconnect", False)),
             }
@@ -797,6 +951,8 @@ class Handler(BaseHTTPRequestHandler):
             ok, err = APP.pause()
         elif path == "/api/stop":
             ok, err = APP.stop()
+        elif path == "/api/repeat/moyu":
+            ok, err = APP.set_repeat_moyu(bool((data or {}).get("enabled")))
         elif path == "/api/clear-errors":
             mk.clear_errors()
             ok, err = True, ""
@@ -999,8 +1155,20 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/record/cancel":
             ok, err = APP.cancel_recording()
         elif path == "/api/perm-check":
-            # 权限自检已停用，不再探测、不弹窗
-            self._json(200, {"ok": True, "perm": {"disabled": True, "hint": ""}})
+            authorized = mk.ensure_screen_capture_access(
+                request=bool((data or {}).get("request", True))
+            )
+            self._json(200, {
+                "ok": True,
+                "perm": {
+                    "authorized": bool(authorized),
+                    "hint": (
+                        "屏幕录制权限正常，可以开始任务"
+                        if authorized else
+                        "请在系统设置中打开“终端”的屏幕与系统音频录制权限"
+                    ),
+                },
+            })
             return
         elif path == "/api/self-restart":
             # 默认绝不重编：删 bin 重编会换 CDHash，屏幕录制/辅助功能再弹窗
@@ -1114,6 +1282,7 @@ def run_gui():
     APP.api_base = "http://127.0.0.1:%s" % port
     APP.write_overlay_ctrl(False)
     APP.write_watch_ctrl(False)
+    APP.start_repeat_scheduler()
     atexit.register(stop_overlay)
     atexit.register(mk.stop_f12_guardian)
     atexit.register(mk.restore_mouse)
@@ -1136,14 +1305,26 @@ def run_gui():
     mk.start_f12_guardian(start_cb=f12_start_from_idle)
     mk.run_mode = "idle"
     APP.enqueue_log("全局快捷键：F12=砸开终止（立刻恢复鼠标）；F8=手动点完继续；空闲再按 F12=开始")
-    APP.enqueue_log("[截屏] 已关闭主动截屏（不弹屏幕录制）；识图请用手校点位/已有截图")
+    APP.enqueue_log("[截屏] 开始任务前会先检查屏幕录制权限；未授权时不会操作手机或重启镜像")
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
+    os.makedirs(os.path.dirname(URL_FILE), exist_ok=True)
+    with open(URL_FILE, "w", encoding="utf-8") as f:
+        f.write(url + "\n")
     print("GUI_URL=%s" % url, flush=True)
     print("界面地址：%s" % url, flush=True)
     print("提示：随时按 F12 可紧急终止并恢复鼠标", flush=True)
     if "--serve" in sys.argv:
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+        httpd.shutdown()
+        return
+    if "--browser" in sys.argv:
+        webbrowser.open(url)
         try:
             while True:
                 time.sleep(1)
@@ -1177,11 +1358,15 @@ def write_pid():
 
 def clear_pid():
     try:
-        if not os.path.isfile(PID_FILE):
-            return
-        with open(PID_FILE) as f:
-            if f.read().strip() == str(os.getpid()):
-                os.remove(PID_FILE)
+        if os.path.isfile(PID_FILE):
+            with open(PID_FILE) as f:
+                if f.read().strip() == str(os.getpid()):
+                    os.remove(PID_FILE)
+    except Exception:
+        pass
+    try:
+        if os.path.isfile(URL_FILE):
+            os.remove(URL_FILE)
     except Exception:
         pass
 
