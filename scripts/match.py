@@ -47,7 +47,7 @@ def ncc_at(hay_px, prep, ox, oy):
     return max(-1.0, min(1.0, cov / (math.sqrt(max(1e-2, pvar)) * tstd)))
 
 
-def search(hay, prep, roi, step=2):
+def search(hay, prep, roi, step=2, floor=0.55):
     hw, hh = hay.size
     hay_px = hay.load()
     _, _, _, _, nw, nh = prep
@@ -63,7 +63,7 @@ def search(hay, prep, roi, step=2):
         x = x0
         while x <= x1:
             s = ncc_at(hay_px, prep, x, y)
-            if s >= 0.55:
+            if s >= floor:
                 cands.append((s, x, y))
             x += step
         y += step
@@ -138,6 +138,14 @@ def continue_rois(portrait):
     ]
 
 
+def _jz_card(base):
+    """止戈 / 觉障林 / 开始匹配 / 退出匹配：按当前画面原尺寸找，不再半分辨率多尺度。"""
+    name = os.path.basename(base).lower()
+    return any(k in name for k in (
+        "jz_zhige", "jz_juezhanglin", "jz_start_match", "jz_exit_match",
+    ))
+
+
 def _scaled_jobs(im, path, rois, scales, tag=""):
     out = []
     for sc in scales:
@@ -163,6 +171,40 @@ def collect_templates(paths, portrait):
         try:
             im = Image.open(path).convert("L")
         except Exception:
+            continue
+
+        # 右上角返回标：只扫这一角，不旋转
+        if "back_chevron" in base:
+            rois = [(0.84, 0.02, 0.16, 0.18)]
+            scales = (1.0,)
+            jobs.extend(_scaled_jobs(im, path, rois, scales))
+            continue
+
+        # 「继续游戏」四个字：横屏在右侧中部，不旋转
+        if "continue_label" in base:
+            rois = [(0.70, 0.42, 0.26, 0.24)]
+            scales = (1.0,)
+            jobs.extend(_scaled_jobs(im, path, rois, scales))
+            continue
+
+        # 左下角四格菜单：游戏主界面，不旋转
+        if "hud_menu" in base:
+            rois = [(0.02, 0.76, 0.18, 0.20)]
+            scales = (1.0,)
+            jobs.extend(_scaled_jobs(im, path, rois, scales))
+            continue
+
+        # 「仗剑长啸」开屏标语：底部居中，不旋转
+        if "splash_slogan" in base:
+            rois = [(0.30, 0.78, 0.45, 0.18)]
+            scales = (1.0,)
+            jobs.extend(_scaled_jobs(im, path, rois, scales))
+            continue
+
+        if base.startswith("jz_"):
+            rois = [(0.0, 0.0, 1.0, 1.0)]
+            scales = (1.0,) if _jz_card(base) else (0.75, 1.0, 1.25)
+            jobs.extend(_scaled_jobs(im, path, rois, scales))
             continue
 
         # 公告关闭（黑底浅色）：优先用二值模板；尺度/旋转收紧，避免卡顿
@@ -296,12 +338,29 @@ def main():
     weak = -1.0
     weak_name = ""
     for im, scale, rois, name in jobs:
-        prep = prepare(im)
+        base = os.path.basename(name).lower()
+        hay_use = hay
+        prep_im = im
+        # 「继续游戏」、菜单、小图标先半分辨率扫。大卡片按原图找，半分辨率会把细字分数打下去。
+        if (
+            "hud_menu" in base or "splash_slogan" in base
+            or (base.startswith("jz_") and not _jz_card(base))
+        ):
+            hay_use = hay.resize((max(8, hay.size[0] // 2), max(8, hay.size[1] // 2)), Image.BOX)
+            prep_im = im.resize((max(8, im.size[0] // 2), max(8, im.size[1] // 2)), Image.BOX)
+        prep = prepare(prep_im)
         if not prep:
             continue
-        step = 1 if max(prep[4], prep[5]) <= 40 else 2
+        step = 2 if _jz_card(base) else 1 if (
+            "back_chevron" in base or "continue_label" in base
+            or "hud_menu" in base or "splash_slogan" in base or base.startswith("jz_")
+        ) else (
+            2 if max(prep[4], prep[5]) > 40 else 1
+        )
         for roi in rois:
-            hit = search(hay, prep, roi, step=step)
+            # 细字模板差一个像素分数就掉下去，粗扫先放低，再在附近找最高点
+            floor = 0.45 if _jz_card(base) else 0.55
+            hit = search(hay_use, prep, roi, step=step, floor=floor)
             if not hit:
                 continue
             if hit[0] > weak:
@@ -309,8 +368,8 @@ def main():
                 weak_name = name
             if hit[0] < min_score:
                 continue
-            fx = (hit[1] + prep[4] / 2.0) / hay.size[0]
-            fy = (hit[2] + prep[5] / 2.0) / hay.size[1]
+            fx = (hit[1] + prep[4] / 2.0) / hay_use.size[0]
+            fy = (hit[2] + prep[5] / 2.0) / hay_use.size[1]
             cand = (hit[0], fx, fy, scale, name)
             if best is None or cand[0] > best[0]:
                 best = cand

@@ -1,9 +1,9 @@
 # game-plugin 项目文档（方案优化用）
 
 > 用途：给其他 AI / 工程师做方案评审与优化。  
-> 仓库：`/Users/ziyuan/code/game-plugin`（远程 `git@github.com:ziYu4n/game-plugin.git`，`main` 可能尚无提交）  
+> 仓库：`/Users/ziyuan/code/game-plugin`（远程 `git@github.com:ziYu4n/game-plugin.git`，分支 `main`）  
 > 环境：macOS Darwin 27（Tahoe），官方 **iPhone 镜像**（`/System/Applications/iPhone Mirroring.app`）  
-> 文档日期：2026-10-13
+> 文档日期：2026-10-13。**当前怎么用、觉障林怎么跑，以 `SUMMARY.md`（2026-11-18）为准。**下文是更早的方案说明。
 
 ---
 
@@ -19,7 +19,7 @@
 6. OCR 识别账号并在 UI 左下角展示  
 7. 队列执行、日志可复制、错误暂存可手动清空  
 
-产品名：**脚本合集**。当前只保留浏览器控制台作为正式入口，桌面 App 已停用。
+产品名：**脚本合集**。正式入口是桌面「脚本合集」或 `start.command`，打开本机页面。
 
 ### 明确不做 / 暂缓
 

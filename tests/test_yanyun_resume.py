@@ -211,7 +211,7 @@ class YanyunFlowResumeTests(unittest.TestCase):
         ]))
         self.calls["silent_click_screen"].assert_called_once()
         self.assertEqual(self.calls["silent_click_screen"].call_args.kwargs["tag"], "(start_match)")
-        self.calls["game_click_screen"].assert_called_once()
+        self.calls["game_click_screen"].assert_not_called()
         self.calls["kill_game_background"].assert_called_once()
 
     def test_stale_home_phase_does_not_override_current_game_page(self):

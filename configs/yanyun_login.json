@@ -29,6 +29,7 @@
       "interval": 0.6,
       "stage_confirmations": 2,
       "transition_timeout": 8.0,
+      "max_same_actions": 4,
       "max_recoveries": 3,
       "required": true
     }

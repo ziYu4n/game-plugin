@@ -56,8 +56,19 @@ BACK_ICON_LAND_0X8 = os.path.join(ROOT, "icons", "back_land_0x8.png")
 CONTINUE_ICON_PORT = os.path.join(ROOT, "icons", "continue_game_port.png")
 CONTINUE_ICON_LAND = os.path.join(ROOT, "icons", "continue_game_land.png")
 CONTINUE_ICON_LAND_ALT = os.path.join(ROOT, "icons", "continue_game_land_alt.png")
+CONTINUE_LABEL_LAND = os.path.join(ROOT, "icons", "continue_label_land.png")
+HUD_MENU_LAND = os.path.join(ROOT, "icons", "hud_menu_land.png")
+SPLASH_SLOGAN_LAND = os.path.join(ROOT, "icons", "splash_slogan_land.png")
+JZ_ID = os.path.join(ROOT, "icons", "jz_id_land.png")
+JZ_CHAR_MENU = os.path.join(ROOT, "icons", "jz_char_menu.png")
+JZ_TONGYOU = os.path.join(ROOT, "icons", "jz_tongyou.png")
+JZ_ZHIGE = os.path.join(ROOT, "icons", "jz_zhige.png")
+JZ_JUEZHANGLIN = os.path.join(ROOT, "icons", "jz_juezhanglin.png")
+JZ_START = os.path.join(ROOT, "icons", "jz_start_match.png")
+JZ_EXIT = os.path.join(ROOT, "icons", "jz_exit_match.png")
 POPUP_CLOSE_ICON = os.path.join(ROOT, "icons", "popup_close.png")
 POPUP_CLOSE_ALT = os.path.join(ROOT, "icons", "popup_close_alt.png")
+BACK_CHEVRON_LAND = os.path.join(ROOT, "icons", "back_chevron_land.png")
 ANNOUNCE_CLOSE = os.path.join(ROOT, "icons", "announce_close.png")
 ANNOUNCE_CLOSE_BW = os.path.join(ROOT, "icons", "announce_close_bw.png")
 ANNOUNCE_CLOSE_HI = os.path.join(ROOT, "icons", "announce_close_hi.png")
@@ -1394,7 +1405,10 @@ def is_wrong_app(items):
         return "connecting"
     if contains_any(text, WRONG_APP_WORDS):
         return "wechat"
-    long_lines = [n for n in names if len((n or "").replace(" ", "")) >= 8]
+    long_lines = [
+        n for n in names
+        if len((n or "").replace(" ", "")) >= 8 and any("\u4e00" <= ch <= "\u9fff" for ch in n)
+    ]
     if len(long_lines) >= 5:
         return "other"
     return ""
@@ -1491,7 +1505,7 @@ def continue_templates():
     return [p for p in paths if os.path.isfile(p)]
 
 
-def find_icon(template_path, min_score=0.85, extra_templates=None):
+def find_icon(template_path, min_score=0.85, extra_templates=None, roi=None):
     templates = []
     if template_path:
         templates.append(template_path)
@@ -1512,6 +1526,8 @@ def find_icon(template_path, min_score=0.85, extra_templates=None):
     args = [sys.executable, MATCH_PY, SCREENSHOT, templates[0], str(min_score)]
     for p in templates[1:]:
         args.extend(["--template", p])
+    if roi and len(roi) == 4:
+        args.extend(["--roi"] + [str(float(v)) for v in roi])
     code, out, err = run_cmd(args, timeout=18)
     text = (out or "").strip()
     if not text or text.startswith("none"):
@@ -1536,7 +1552,7 @@ def find_icon(template_path, min_score=0.85, extra_templates=None):
         log_click("match", fx, fy, sx, sy, fx_img * m.shot_w, fy_img * m.shot_h)
     else:
         fx, fy = float(fx_img), float(fy_img)
-    if not in_window_safe(fx, fy):
+    if not roi and not in_window_safe(fx, fy):
         log("WARN", "图标命中过靠边，丢弃 %.3f,%.3f score=%.2f" % (fx, fy, score))
         return None
     log("INFO", "图标命中 %s score=%.3f outer=%.3f,%.3f" % (tmpl, score, fx, fy))
@@ -2040,6 +2056,20 @@ def fallback_back_button():
     return BACK_BUTTON_LAND
 
 
+def find_corner_back(min_score=0.72):
+    """只认屏幕右上角这枚返回标，命中后由调用方点一下。"""
+    if not os.path.isfile(BACK_CHEVRON_LAND):
+        return None
+    hit = find_icon(BACK_CHEVRON_LAND, float(min_score))
+    if not hit:
+        return None
+    fx, fy, score = hit
+    if fx < 0.70 or fy > 0.34:
+        log("DEBUG", "返回标不在右上角，忽略 %.3f,%.3f" % (fx, fy))
+        return None
+    return fx, fy, score
+
+
 def find_back_button(min_score=None):
     cfg = match_defaults()
     # 黑底浅色关闭键：阈值略放宽
@@ -2055,6 +2085,48 @@ def find_continue_icon(min_score=0.62):
     if not templates:
         return None
     return find_icon(templates[0], float(min_score), extra_templates=templates[1:])
+
+
+def find_continue_label(min_score=0.72):
+    """认横屏右侧「继续游戏」四个字，命中后由调用方点一下。"""
+    if not os.path.isfile(CONTINUE_LABEL_LAND):
+        return None
+    hit = find_icon(CONTINUE_LABEL_LAND, float(min_score))
+    if not hit:
+        return None
+    fx, fy, score = hit
+    if fx < 0.55 or fy < 0.32 or fy > 0.80:
+        log("DEBUG", "继续游戏不在右侧，忽略 %.3f,%.3f" % (fx, fy))
+        return None
+    return fx, fy, score
+
+
+def find_hud_menu(min_score=0.72):
+    """认游戏主界面左下角四格菜单。"""
+    if not os.path.isfile(HUD_MENU_LAND):
+        return None
+    hit = find_icon(HUD_MENU_LAND, float(min_score))
+    if not hit:
+        return None
+    fx, fy, score = hit
+    if fx > 0.28 or fy < 0.72:
+        log("DEBUG", "四格菜单不在左下角，忽略 %.3f,%.3f" % (fx, fy))
+        return None
+    return fx, fy, score
+
+
+def find_splash_slogan(min_score=0.72):
+    """认开屏「仗剑长啸 万里同行」，命中后按开屏点掉。"""
+    if not os.path.isfile(SPLASH_SLOGAN_LAND):
+        return None
+    hit = find_icon(SPLASH_SLOGAN_LAND, float(min_score))
+    if not hit:
+        return None
+    fx, fy, score = hit
+    if fx < 0.28 or fx > 0.78 or fy < 0.72:
+        log("DEBUG", "开屏标语位置不对，忽略 %.3f,%.3f" % (fx, fy))
+        return None
+    return fx, fy, score
 
 
 def continue_fallback_point():
@@ -3229,8 +3301,13 @@ def ocr_items(accurate=False, recapture=True):
     if accurate:
         args.append("--accurate")
     args.append(SCREENSHOT)
-    code, out, err = run_cmd(args, timeout=20 if accurate else 12)
+    # accurate 在本机常卡死；超时缩短后立刻回落快模式，避免每轮空等 20s
+    code, out, err = run_cmd(args, timeout=8 if accurate else 12)
     if code != 0:
+        if accurate:
+            # Vision .accurate 在部分机子上会卡死到 timeout；快模式通常够用
+            log("WARN", "准 OCR 失败(%s)，改用快 OCR" % (err or out or "empty"))
+            return ocr_items(accurate=False, recapture=False)
         log("WARN", "OCR 识别失败: %s" % (err or out))
         return []
     items = []
@@ -3248,6 +3325,9 @@ def ocr_items(accurate=False, recapture=True):
             })
         except Exception:
             continue
+    if accurate and not items:
+        log("WARN", "准 OCR 无结果，改用快 OCR")
+        return ocr_items(accurate=False, recapture=False)
     return items
 
 
@@ -3702,9 +3782,20 @@ def prepare_task_home():
         return False
     if not wait_mirror_ready(35):
         return False
+    ensure_mirror_large()
     if not unlock_if_needed():
         return False
-    return go_home({"hotkey": "cmd-1", "attempts": 2, "gesture_fallback": False})
+    ok = go_home({"hotkey": "cmd-1", "attempts": 2, "gesture_fallback": True})
+    if ok:
+        return True
+    # 最后再认一次：有时 OCR 抖，实际已在桌面
+    kind = phone_screen_kind(relaxed_home=True)
+    if kind == "home":
+        log("INFO", "二次确认已在桌面")
+        set_phase("home")
+        return True
+    log("WARN", "没确认回到主屏幕（当前=%s）" % kind)
+    return False
 
 
 def open_search(step=None):
@@ -5229,6 +5320,36 @@ def yanyun_phrase_hit(items, words):
     return None
 
 
+def shot_is_mostly_black(max_mean=22):
+    """开游戏后常见黑屏/加载；用缩略亮度判断，避免当 unknown 空转。"""
+    try:
+        from PIL import Image
+        if not (os.path.isfile(SCREENSHOT) and os.path.getsize(SCREENSHOT) > 1000):
+            return False
+        im = Image.open(SCREENSHOT).convert("L").resize((48, 28))
+        return (sum(im.getdata()) / float(48 * 28)) < float(max_mean)
+    except Exception:
+        return False
+
+
+def looks_like_announcement_page(items):
+    """快 OCR 常把公告栏认成乱码：用关键词 + 版本号/日期列表兜底。"""
+    items = items or []
+    blob = joined_ocr(items)
+    if contains_any(blob, [
+        "更新公告", "版本更新", "在线修复", "玩法内容", "游侠亲启",
+        "不删档", "白露沾衣", "公告", "人间浮幻",
+    ]):
+        return True
+    has_ver = bool(re.search(r"\d\.\d\.\d", blob or ""))
+    date_hits = len(re.findall(r"(?:1[0-2]|[1-9])/\d{1,2}", blob or ""))
+    if is_landscape() and has_ver and date_hits >= 2:
+        return True
+    if is_landscape() and date_hits >= 3:
+        return True
+    return False
+
+
 def moyu_progress(items):
     """Classify the visible page; blocking dialogs always outrank their underlay."""
     items = items or []
@@ -5247,7 +5368,7 @@ def moyu_progress(items):
         "其他设备", "其它设备", "是否继续", "账号在别处登录",
     ]):
         return "online_confirm"
-    if match_app_item(items, [
+    if looks_like_announcement_page(items) or match_app_item(items, [
         "更新公告", "版本更新", "在线修复公告", "玩法内容", "游侠亲启",
         "不删档活动", "白露沾衣", "公告",
     ]):
@@ -5283,8 +5404,20 @@ def moyu_progress(items):
     home_words = [word for word in HOME_SCREEN_WORDS if word != "设置"]
     if match_app_item(items, home_words):
         return "home"
+    if is_landscape():
+        if find_splash_slogan():
+            return "splash"
+        menu = find_hud_menu()
+        if menu:
+            return "hud"
     if is_wrong_app(items):
         return "wrong_app"
+    # 横屏黑屏：当开屏/加载，点一下唤醒
+    if is_landscape() and shot_is_mostly_black():
+        return "splash"
+    # 横屏 + 返回键图标：多半卡在公告
+    if is_landscape() and find_back_button(min_score=0.55):
+        return "announcement"
     # Short snippets of unrecognized game text are not proof of a phone desktop.
     return "unknown"
 
@@ -5340,22 +5473,25 @@ def _yanyun_page_action(state, items, step):
     if state == "splash":
         return _wake_moyu_screen(clicks=1, wait_after=0.8)
     if state == "announcement":
-        point = back_button_pos()
-        # An OCR close label gives another path when a saved coordinate went stale.
-        if step.get("_action_attempt", 0):
-            hit = _yanyun_button_hit(items, ["关闭", "返回", "知道了", "我知道了"])
-            icon = find_back_button(min_score=0.65)
-            if icon:
-                point = icon[:2]
-            elif hit:
-                point = ocr_hit_to_outer(hit)
-        return _yanyun_click(point, "(close announcement)")
+        icon = find_corner_back()
+        if not icon:
+            log("WARN", "公告页没识别到右上角返回标")
+            return False
+        log("INFO", "关公告：点右上角返回标 %.3f,%.3f" % (icon[0], icon[1]))
+        return _yanyun_click((icon[0], icon[1]), "(close announcement)")
     if state == "continue_game":
         account, box = username_near(items)
         if account:
             set_current_account(account, box)
+        icon = find_continue_label()
+        if icon:
+            log("INFO", "点继续游戏 %.3f,%.3f" % (icon[0], icon[1]))
+            return _yanyun_click((icon[0], icon[1]), "(continue game)")
         hit = yanyun_phrase_hit(items, ["继续游戏"])
-        point = ocr_hit_to_outer(hit) if hit else find_continue_target(items)[:2]
+        if not hit:
+            log("WARN", "没识别到「继续游戏」")
+            return False
+        point = ocr_hit_to_outer(hit)
         return _yanyun_click(point, "(continue game)")
     if state in ("online_confirm", "enter_game", "start_game"):
         words = {
@@ -5372,13 +5508,16 @@ def _yanyun_page_action(state, items, step):
             point = continue_fallback_point()
         return _yanyun_click(point, "(" + state + ")")
     if state == "hud":
+        icon = find_hud_menu()
+        if icon:
+            log("INFO", "点左下角菜单 %.3f,%.3f" % (icon[0], icon[1]))
+            return _yanyun_click((icon[0], icon[1]), "(moyu menu)")
         calibrated = resolve_moyu_tap("menu")
         point = ((calibrated[0], calibrated[1]) if calibrated else (
             step.get("menu_point_port") or [0.9265, 0.9122]
             if is_portrait_window() else step.get("menu_point_land") or [0.19, 0.94]
         ))
-        screen = point_in_window(point[0], point[1])
-        return bool(screen and game_click_screen(screen[0], screen[1], tag="(moyu menu)"))
+        return _yanyun_click(point, "(moyu menu)")
     action_labels = {
         "tongyou": (["同游"], "tongyou"),
         "zhige": (["止戈"], "zhige"),
@@ -5395,6 +5534,221 @@ def _yanyun_page_action(state, items, step):
     return False
 
 
+def ocr_roi_items(roi):
+    """只识别截图里的一块，坐标换回整张图。"""
+    if not ensure_ocr_bin():
+        return []
+    if not (os.path.isfile(SCREENSHOT) and os.path.getsize(SCREENSHOT) > 1000):
+        return []
+    x, y, w, h = [float(v) for v in roi]
+    dst = os.path.join(DATA_DIR, "ocr_roi.png")
+    code, _out, _err = run_cmd([
+        OCR_BIN, "--crop", SCREENSHOT, dst, str(x), str(y), str(w), str(h),
+    ], timeout=6)
+    if code != 0:
+        return []
+    code, out, err = run_cmd([OCR_BIN, "--boxes", dst], timeout=8)
+    if code != 0:
+        return []
+    items = []
+    for line in (out or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 5:
+            continue
+        try:
+            items.append({
+                "text": parts[0].strip(),
+                "x": x + float(parts[1]) * w,
+                "y": y + float(parts[2]) * h,
+                "w": float(parts[3]) * w,
+                "h": float(parts[4]) * h,
+            })
+        except Exception:
+            continue
+    return items
+
+
+def _wait_marker(path, roi, timeout, min_score=0.70):
+    """找图标。第一次没认到先点屏幕中间，把屏保点掉，再继续认。"""
+    end = time.monotonic() + max(0.5, float(timeout))
+    woke = False
+    while time.monotonic() < end:
+        if not wait_if_paused():
+            return None
+        hit = find_icon(path, min_score, roi=roi)
+        if hit:
+            return hit
+        if not woke:
+            woke = True
+            log("INFO", "没识别到，点一下屏幕中间退出屏保")
+            if not _wake_moyu_screen(clicks=1, wait_after=0.7):
+                return None
+            continue
+        if not sleep_wait(0.35):
+            return None
+    return None
+
+
+def _click_marker(hit, tag):
+    if not hit:
+        return False
+    return _yanyun_click((hit[0], hit[1]), tag)
+
+
+def _read_role_from_panel(bottom_id):
+    items = ocr_roi_items((0.55, 0.0, 0.42, 0.38))
+    names = [it.get("text") for it in items if it.get("text")]
+    if names:
+        log("INFO", "角色页文字：%s" % "、".join(names[:16]))
+    anchor = None
+    digits = re.sub(r"\D", "", bottom_id or "")
+    for it in items:
+        text = (it.get("text") or "").replace(" ", "")
+        if "角色编号" in text or ("角色" in text and "编" in text):
+            anchor = it
+            break
+        got = re.sub(r"\D", "", text)
+        if digits and len(got) >= 6 and (digits[:6] in got or got[:6] in digits):
+            anchor = it
+            break
+    if not anchor:
+        return ""
+    ax = float(anchor.get("x") or 0)
+    ay = float(anchor.get("y") or 0)
+    best = None
+    best_d = 9e9
+    skip = (
+        "角色编号", "角色", "编号", "多人模式", "已达版本", "包裹", "培养",
+        "武林录", "商店", "活动", "外观", "同游", "家业", "伙伴", "百业",
+        "和鸣", "不肝", "新燕特惠",
+    )
+    for it in items:
+        text = (it.get("text") or "").strip()
+        if not text or any(word in text for word in skip):
+            continue
+        cjk = [ch for ch in text if "\u4e00" <= ch <= "\u9fff"]
+        if len(cjk) < 2 or len(cjk) > 8:
+            continue
+        cy = float(it.get("y") or 0)
+        cx = float(it.get("x") or 0)
+        if cy >= ay - 0.004:
+            continue
+        dist = abs(cx - ax) + (ay - cy)
+        if dist < best_d:
+            best_d = dist
+            best = it
+    if not best:
+        return ""
+    set_current_account(best.get("text"), best)
+    return best.get("text") or ""
+
+
+def _open_tongyou_for_zhige(bottom_id, left):
+    """角色菜单没开时：点右上角角色图标，记下角色名，再点同游。"""
+    log("INFO", "找右上角角色菜单")
+    tongyou = find_icon(JZ_TONGYOU, 0.72, roi=(0.6, 0.4, 0.38, 0.45))
+    if not tongyou:
+        menu = _wait_marker(JZ_CHAR_MENU, (0.72, 0.0, 0.28, 0.34), min(12.0, left()))
+        if not menu or not _click_marker(menu, "(char menu)"):
+            log("WARN", "没点到右上角角色菜单")
+            return False
+        if not sleep_wait(1.0):
+            return False
+    else:
+        log("INFO", "角色菜单已经开着")
+
+    role = ""
+    role_end = time.monotonic() + min(6.0, left())
+    while time.monotonic() < role_end and not role:
+        role = _read_role_from_panel(bottom_id)
+        if role:
+            break
+        if not sleep_wait(0.4):
+            return False
+    if role:
+        log("INFO", "角色名已显示到脚本页：%s" % role)
+    elif bottom_id:
+        set_current_account(bottom_id)
+        log("WARN", "没读到角色名，脚本页先显示编号 %s" % bottom_id)
+
+    log("INFO", "找同游")
+    if not tongyou:
+        tongyou = _wait_marker(JZ_TONGYOU, (0.6, 0.4, 0.38, 0.45), min(12.0, left()), 0.72)
+    if not tongyou or not _click_marker(tongyou, "(tongyou)"):
+        log("WARN", "没点到同游")
+        return False
+    if not sleep_wait(1.2):
+        return False
+    return None
+
+
+def finish_juezhanglin(step):
+    """角色菜单 → 同游 → 止戈 → 觉障林 → 开始匹配，看到退出匹配后回桌面。"""
+    timeout = max(30.0, float(step.get("timeout") or 180))
+    end = time.monotonic() + timeout
+
+    def left():
+        return max(3.0, end - time.monotonic())
+
+    id_items = ocr_roi_items((0.0, 0.86, 0.45, 0.14))
+    blob = "".join((it.get("text") or "") for it in id_items)
+    found = re.search(r"(\d{6,})", blob.replace(" ", ""))
+    bottom_id = found.group(1) if found else ""
+    log("INFO", "左下角角色 ID：%s" % (bottom_id or "已看到 ID 标记"))
+
+    log("INFO", "看是不是已经在同游页")
+    zhige_roi = (0.30, 0.64, 0.36, 0.24)
+    zhige = find_icon(JZ_ZHIGE, 0.72, roi=zhige_roi)
+    if not zhige:
+        log("INFO", "没看到止戈，点一下屏幕中间后再认")
+        if not _wake_moyu_screen(clicks=1, wait_after=0.7):
+            return False
+        zhige = find_icon(JZ_ZHIGE, 0.72, roi=zhige_roi)
+    if zhige:
+        log("INFO", "已经在同游页，直接点止戈")
+        if bottom_id:
+            set_current_account(bottom_id)
+    else:
+        opened = _open_tongyou_for_zhige(bottom_id, left)
+        if opened is False:
+            return False
+        zhige = None
+
+    if not zhige:
+        log("INFO", "找止戈")
+        zhige = _wait_marker(JZ_ZHIGE, (0.30, 0.64, 0.36, 0.24), min(16.0, left()), 0.70)
+    if not zhige or not _click_marker(zhige, "(zhige)"):
+        log("WARN", "没点到止戈")
+        return False
+    if not sleep_wait(1.2):
+        return False
+
+    log("INFO", "找觉障林")
+    lin = _wait_marker(JZ_JUEZHANGLIN, (0.0, 0.05, 0.78, 0.9), min(16.0, left()), 0.58)
+    if not lin or not _click_marker(lin, "(juezhanglin)"):
+        log("WARN", "没点到觉障林")
+        return False
+    if not sleep_wait(1.0):
+        return False
+
+    log("INFO", "找开始匹配")
+    start = _wait_marker(JZ_START, (0.42, 0.6, 0.58, 0.4), min(14.0, left()), 0.6)
+    if not start or not _click_marker(start, "(start match)"):
+        log("WARN", "没点到开始匹配")
+        return False
+    if not sleep_wait(1.0):
+        return False
+
+    log("INFO", "等同一位置变成退出匹配")
+    exit_hit = _wait_marker(JZ_EXIT, (0.42, 0.6, 0.58, 0.4), min(16.0, left()), 0.6)
+    if not exit_hit:
+        log("WARN", "没看到退出匹配")
+        return False
+    log("INFO", "已是退出匹配，匹配成功，回到桌面")
+    go_home()
+    return True
+
+
 def run_moyu_flow(step):
     """Resume login or matching from observations, with bounded recovery attempts."""
     if not ensure_mirror_ready(wait_connected=False):
@@ -5405,7 +5759,7 @@ def run_moyu_flow(step):
         return False
     timeout = max(1.0, float(step.get("timeout") or 180))
     interval = max(0.1, float(step.get("interval") or 1.0))
-    max_same = max(1, int(step.get("max_same_actions") or 3))
+    max_same = max(1, int(step.get("max_same_actions") or 4))
     max_recoveries = max(0, int(step.get("max_recoveries", 3)))
     launch_wait = max(5.0, float(step.get("launch_wait") or 45.0))
     confirmations = max(2, int(step.get("stage_confirmations") or 2))
@@ -5415,6 +5769,9 @@ def run_moyu_flow(step):
     observed_state, observed_hits = "", 0
     pending_from, pending_deadline = "", 0.0
     action_state, same_actions = "", 0
+    corner_clicks = 0
+    continue_clicks = 0
+    last_wake = 0.0
     state_since = time.monotonic()
     settle_until = 0.0
     recoveries = 0
@@ -5426,6 +5783,7 @@ def run_moyu_flow(step):
     def recover(reason, reconnect=False):
         nonlocal recoveries, observed_state, observed_hits, pending_from
         nonlocal pending_deadline, action_state, same_actions, settle_until, state_since
+        nonlocal corner_clicks, continue_clicks
         if recoveries >= max_recoveries:
             save_shot("yanyun_recovery_exhausted")
             log("WARN", "自动恢复次数已用尽：%s" % reason)
@@ -5445,6 +5803,8 @@ def run_moyu_flow(step):
         observed_state, observed_hits = "", 0
         pending_from, pending_deadline = "", 0.0
         action_state, same_actions = "", 0
+        corner_clicks = 0
+        continue_clicks = 0
         state_since = time.monotonic()
         settle_until = state_since + transition_timeout
         set_phase("connecting" if reconnect else "idle")
@@ -5460,7 +5820,49 @@ def run_moyu_flow(step):
             if not recover("镜像窗口丢失", reconnect=True):
                 return False
             continue
-        items = ocr_items(accurate=True)
+        if is_landscape():
+            corner = find_corner_back()
+            if corner and corner_clicks < 4:
+                corner_clicks += 1
+                log("INFO", "识别到右上角返回标，点击一次（%s/4） %.3f,%.3f score=%.2f" % (
+                    corner_clicks, corner[0], corner[1], corner[2],
+                ))
+                _yanyun_click((corner[0], corner[1]), "(corner back)")
+                observed_state, observed_hits = "", 0
+                if not sleep_wait(max(interval, 0.8)):
+                    return False
+                continue
+            if not corner:
+                corner_clicks = 0
+            label = find_continue_label()
+            if label and continue_clicks < 3:
+                continue_clicks += 1
+                log("INFO", "识别到继续游戏，点击一次（%s/3） %.3f,%.3f score=%.2f" % (
+                    continue_clicks, label[0], label[1], label[2],
+                ))
+                _yanyun_click((label[0], label[1]), "(continue game)")
+                observed_state, observed_hits = "", 0
+                settle_until = time.monotonic() + launch_wait
+                if not sleep_wait(max(interval, 0.8)):
+                    return False
+                continue
+            if not label:
+                continue_clicks = 0
+            seen_id = None
+            if goal == "matching" and type(ocr_items).__name__ == "function" and os.path.isfile(JZ_ID):
+                seen_id = find_icon(JZ_ID, 0.90, roi=(0.0, 0.84, 0.42, 0.16))
+                if seen_id:
+                    log("INFO", "左下角已有角色 ID，按觉障林步骤继续")
+                    return finish_juezhanglin(step)
+            # 返回标、继续游戏、角色 ID 都没有：多半是屏保盖住了
+            if not corner and not label and not seen_id and time.monotonic() - last_wake >= 8.0:
+                log("INFO", "横屏没识别到页面，点一下屏幕中间退出屏保")
+                if not _wake_moyu_screen(clicks=1, wait_after=0.7):
+                    return False
+                last_wake = time.monotonic()
+                observed_state, observed_hits = "", 0
+                continue
+        items = ocr_items(accurate=False)
         # Capture may fail during the observation. Do not recover by blind clicks.
         if screen_tcc_denied() or capture_denied() or should_stop():
             return False
@@ -5496,6 +5898,17 @@ def run_moyu_flow(step):
                 pending_from, pending_deadline = "", 0.0
 
         if state == "unknown":
+            if is_landscape():
+                # 已经在游戏横屏里。认不出就点一下中间退出屏保，再继续认，不退回桌面
+                if time.monotonic() - last_wake >= 8.0:
+                    log("INFO", "没识别到页面，点一下屏幕中间退出屏保")
+                    if not _wake_moyu_screen(clicks=1, wait_after=0.7):
+                        return False
+                    last_wake = time.monotonic()
+                    observed_state, observed_hits = "", 0
+                elif not sleep_wait(interval):
+                    return False
+                continue
             if observed_hits >= confirmations and now >= max(settle_until, state_since + transition_timeout):
                 if not recover("当前页面暂时无法识别，返回桌面重新进入"):
                     return False
@@ -5531,6 +5944,11 @@ def run_moyu_flow(step):
                 return False
             continue
 
+        if goal == "matching" and state == "hud":
+            # 主界面不点左下角四格（那是外显快捷），等角色 ID 后走觉障林步骤
+            if not sleep_wait(interval):
+                return False
+            continue
         if state != action_state:
             action_state, same_actions = state, 0
         if same_actions >= max_same:
@@ -6175,19 +6593,24 @@ def run_task(config, options=None, manage_session=True):
     if ok and resume_from_current:
         log("INFO", "从当前页面识别进度并继续")
     elif ok and not options.get("home_ready"):
-        ok = prepare_task_home()
-        if ok:
+        home_ok = prepare_task_home()
+        if home_ok:
             options["home_ready"] = True
+        elif resume_from_current or (config.get("steps") or []):
+            # 桌面确认失败时：有步骤/可续跑的脚本不整队卡死
+            log("WARN", "未确认回到桌面，仍继续后续步骤（请确认镜像已连上）")
+            options["home_ready"] = True
+        else:
+            ok = False
     if ok and use_common:
         search_name = (config.get("search") or "").strip()
         keywords = config.get("keywords") or []
         if search_name or keywords:
             ok = open_game_once(config, options)
             if not ok:
-                # 打开失败时：若脚本本身有步骤，仍尽量继续（手校点击不依赖识图确认）
                 extra0 = config.get("steps") or []
-                if extra0 and ((not ALLOW_SCREEN_CAPTURE) or screen_tcc_denied() or capture_denied()):
-                    log("WARN", "打开游戏未确认成功，但截屏不可用且脚本有步骤 → 继续执行步骤")
+                if extra0:
+                    log("WARN", "打开游戏未确认成功，脚本仍有 %s 步 → 继续执行" % len(extra0))
                     ok = True
                     set_phase("game_playing")
                 else:
@@ -6254,8 +6677,19 @@ def run_queue(configs, options=None):
         opts["mirror_ready"] = True
     if ok and not resume_from_current:
         log("INFO", "统一起点：先触发主屏幕控制并确认手机桌面")
-        ok = prepare_task_home()
-        opts["home_ready"] = bool(ok)
+        home_ok = prepare_task_home()
+        opts["home_ready"] = bool(home_ok)
+        if not home_ok:
+            # 桌面 OCR 偶发失败时：队列里有步骤/可续跑就不整队卡死
+            has_work = any(
+                bool(c.get("resume_from_current") or c.get("steps"))
+                for c in items
+            )
+            if has_work:
+                log("WARN", "未确认回到桌面，仍继续队列（请确认镜像已连上）")
+                opts["home_ready"] = True
+            else:
+                ok = False
     log_window_geom("queue_start")
     total = len(items)
     for i, cfg in enumerate(items):
